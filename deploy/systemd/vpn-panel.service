@@ -1,0 +1,21 @@
+[Unit]
+Description=VPN Panel FastAPI backend (xl2tpd/pppd management)
+After=network-online.target xl2tpd.service ipsec.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/vpn-panel/backend
+EnvironmentFile=/opt/vpn-panel/.env
+ExecStart=/opt/vpn-panel/backend/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=3
+# Needs to write chap-secrets, read /sys, send signals to pppd
+User=root
+Group=root
+NoNewPrivileges=yes
+ProtectHome=yes
+ReadWritePaths=/etc/ppp /var/log/vpn-panel /var/lib/vpn-panel
+
+[Install]
+WantedBy=multi-user.target

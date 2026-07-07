@@ -1,0 +1,21 @@
+[Unit]
+Description=accel-ppp L2TP/PPP server
+After=network-online.target ipsec.service
+Wants=network-online.target
+Conflicts=xl2tpd.service
+
+[Service]
+Type=simple
+ExecStartPre=-/sbin/modprobe l2tp_ppp
+ExecStartPre=-/sbin/modprobe pppol2tp
+ExecStartPre=/bin/mkdir -p /var/log/accel-ppp
+ExecStart=/usr/local/sbin/accel-pppd -c /etc/accel-ppp/accel-ppp.conf
+# reload re-reads the config + chap-secrets without tearing down sessions
+ExecReload=/usr/local/bin/accel-cmd -p 2001 reload
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+LimitCORE=infinity
+
+[Install]
+WantedBy=multi-user.target

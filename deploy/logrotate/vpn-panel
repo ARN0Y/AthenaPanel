@@ -1,0 +1,23 @@
+# /etc/logrotate.d/vpn-panel
+# Audit accounting + hook logs for the panel. The backend reads accounting.log
+# only for "traffic today" (by date prefix), so plain rotation is safe.
+
+/var/log/vpn-panel/accounting.log {
+    daily
+    rotate 30
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0640 root root
+}
+
+/var/log/vpn-panel/ip-up.log {
+    weekly
+    rotate 8
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0640 root root
+}

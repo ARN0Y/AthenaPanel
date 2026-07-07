@@ -1,0 +1,53 @@
+# ─── Secrets / data — MUST NEVER be committed ──────────────────────────────
+.env
+.env.*
+!.env.example
+*.env
+panel.env
+/vpn.db
+*.db
+*.sqlite
+*.sqlite3
+/etc-*
+chap-secrets
+ipsec.secrets
+*.pem
+*.key
+*_key
+id_rsa*
+# backup bundles / dumps (contain full data + secrets)
+*.dump
+*.zip
+*.tar.gz
+*.tar
+athena-backup-*
+vpn-migration*
+backups/
+
+# ─── Build / dependency artifacts ──────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+backend/venv/
+venv/
+.venv/
+frontend/node_modules/
+node_modules/
+frontend/dist/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ─── Logs / diagnostics / editor / OS ──────────────────────────────────────
+*.log
+*.bak
+*.bak-*
+l2tp_diag_*.txt
+*_diag_*.txt
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.claude/
+scratchpad/

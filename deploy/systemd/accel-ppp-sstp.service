@@ -1,0 +1,14 @@
+[Unit]
+Description=accel-ppp SSTP server (TCP/443, shares chap-secrets with xl2tpd)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/bin/mkdir -p /var/log/accel-ppp
+ExecStart=/usr/local/sbin/accel-pppd -c /etc/accel-ppp/sstp.conf -p /run/accel-sstp.pid
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
