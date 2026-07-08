@@ -217,13 +217,14 @@ ok "ppp hooks + network tuning applied"
 # =========================================================================
 log "[6/9] WireGuard (wg-panel)"
 WG_PORT="${WG_LISTEN_PORT:-51820}"; WG_POOL="${WG_POOL:-10.10.0.0/16}"; WG_MTU="${WG_MTU:-1320}"
+WG_CIDR="${WG_POOL#*/}"; WG_NET="${WG_POOL%/*}"; WG_GW="${WG_NET%.*}.1"   # 10.10.0.0/16 -> 10.10.0.1/16
 WAN_IF="$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'dev \K\S+' | head -1)"; WAN_IF="${WAN_IF:-eth0}"
 if [ ! -f /etc/wireguard/wg-panel.conf ]; then
     install -d -m 700 /etc/wireguard
     umask 077; WG_KEY="$(wg genkey)"
     cat > /etc/wireguard/wg-panel.conf <<EOF
 [Interface]
-Address = ${WG_POOL%/*.*}.1/${WG_POOL#*/}
+Address = ${WG_GW}/${WG_CIDR}
 ListenPort = ${WG_PORT}
 PrivateKey = ${WG_KEY}
 MTU = ${WG_MTU}
