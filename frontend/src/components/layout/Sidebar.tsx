@@ -1,6 +1,6 @@
 import { NavLink } from "react-router-dom";
+import { type ReactNode } from "react";
 import {
-  Activity,
   ClipboardList,
   LayoutDashboard,
   Radio,
@@ -31,6 +31,36 @@ export const NAV_ITEMS: NavItemDef[] = [
   { to: "/admins", label: "Admins", icon: Shield, super: true },
   { to: "/audit", label: "Audit Log", icon: ClipboardList, super: true },
 ];
+
+function BrandMark({ className }: { className?: string }) {
+  return (
+    <div
+      className={cn(
+        "relative flex shrink-0 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-indigo-500 via-primary to-violet-500 shadow-lg shadow-primary/30 ring-1 ring-white/15",
+        className,
+      )}
+    >
+      <span className="pointer-events-none absolute inset-x-0 top-0 h-1/2 bg-white/10" />
+      <svg viewBox="0 0 24 24" fill="none" className="relative h-[19px] w-[19px]">
+        <path
+          d="M12 2.6 4.7 5.4v5.1c0 4.5 3.1 8.2 7.3 9.6 4.2-1.4 7.3-5.1 7.3-9.6V5.4L12 2.6Z"
+          fill="white"
+          fillOpacity="0.16"
+          stroke="white"
+          strokeWidth="1.4"
+          strokeLinejoin="round"
+        />
+        <path
+          d="M7.7 12.7h2.1l1.2-3.1 1.7 5.2 1.1-2.1h2.4"
+          stroke="white"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    </div>
+  );
+}
 
 function NavItem({
   item,
@@ -69,9 +99,7 @@ function NavItem({
           <item.icon
             className={cn(
               "h-[18px] w-[18px] shrink-0 transition-colors",
-              isActive
-                ? "text-primary"
-                : "text-current group-hover:text-sidebar-foreground",
+              isActive ? "text-primary" : "text-current group-hover:text-sidebar-foreground",
             )}
           />
           {!collapsed && <span className="truncate">{item.label}</span>}
@@ -81,7 +109,7 @@ function NavItem({
   );
 }
 
-function SectionLabel({ children }: { children: React.ReactNode }) {
+function SectionLabel({ children }: { children: ReactNode }) {
   return (
     <p className="px-3 pb-1 pt-4 text-[10px] font-semibold uppercase tracking-[0.14em] text-sidebar-foreground/35">
       {children}
@@ -104,9 +132,7 @@ export function SidebarContent({
     <div className="flex h-full flex-col border-r border-border/70 bg-sidebar text-sidebar-foreground">
       {/* Brand */}
       <div className={cn("flex h-16 items-center gap-3 px-5", collapsed && "justify-center px-0")}>
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-indigo-400 shadow-lg shadow-primary/25 ring-1 ring-white/10">
-          <Activity className="h-[18px] w-[18px] text-white" />
-        </div>
+        <BrandMark className="h-9 w-9" />
         {!collapsed && (
           <div className="leading-tight">
             <div className="text-[15px] font-semibold tracking-tight">Athena VPN</div>
@@ -115,7 +141,7 @@ export function SidebarContent({
         )}
       </div>
 
-      <nav className="flex-1 space-y-0.5 overflow-y-auto px-3 pb-3">
+      <nav className="flex-1 space-y-0.5 overflow-y-auto px-3 pb-4">
         {!collapsed ? <SectionLabel>Overview</SectionLabel> : <div className="h-2" />}
         {mainItems.map((item) => (
           <NavItem key={item.to} item={item} collapsed={collapsed} onNavigate={onNavigate} />
@@ -134,28 +160,6 @@ export function SidebarContent({
           </>
         )}
       </nav>
-
-      {/* Status footer */}
-      {!collapsed ? (
-        <div className="p-3">
-          <div className="flex items-center gap-2.5 rounded-lg bg-foreground/[0.035] px-3 py-2.5 ring-1 ring-inset ring-border/60">
-            <span className="relative flex h-2 w-2 shrink-0">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success/60" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-success" />
-            </span>
-            <div className="min-w-0 leading-tight">
-              <div className="truncate text-xs font-medium text-sidebar-foreground/85">
-                L2TP · SSTP · WireGuard
-              </div>
-              <div className="text-[10px] text-sidebar-foreground/40">Athena v3.0 · online</div>
-            </div>
-          </div>
-        </div>
-      ) : (
-        <div className="flex justify-center py-4">
-          <span className="h-2 w-2 rounded-full bg-success" />
-        </div>
-      )}
     </div>
   );
 }

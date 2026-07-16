@@ -1,4 +1,5 @@
 import * as React from "react";
+import { Gauge, KeyRound, RefreshCw, ShieldCheck, UserRound } from "lucide-react";
 
 import {
   Dialog,
@@ -37,6 +38,54 @@ function toDateInput(iso: string | null): string {
   return d.toISOString().slice(0, 10);
 }
 
+function randomPassword(len = 12): string {
+  const chars = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let out = "";
+  const arr = new Uint32Array(len);
+  crypto.getRandomValues(arr);
+  for (let i = 0; i < len; i++) out += chars[arr[i] % chars.length];
+  return out;
+}
+
+function Field({
+  label,
+  hint,
+  htmlFor,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  htmlFor?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-baseline justify-between">
+        <Label htmlFor={htmlFor} className="text-xs text-muted-foreground">
+          {label}
+        </Label>
+        {hint && <span className="text-[10px] text-muted-foreground/60">{hint}</span>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function SectionTitle({
+  icon: Icon,
+  children,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+      <Icon className="h-3.5 w-3.5" />
+      {children}
+    </div>
+  );
+}
+
 export function UserFormDialog({
   open,
   onOpenChange,
@@ -69,7 +118,7 @@ export function UserFormDialog({
       setOutbound(user.outbound || "direct");
     } else {
       setUsername("");
-      setPassword("");
+      setPassword(randomPassword());
       setQuotaGb("0");
       setDownMbps("0");
       setUpMbps("0");
@@ -102,111 +151,104 @@ export function UserFormDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto">
+      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>{isEdit ? "Edit User" : "Create User"}</DialogTitle>
+          <div className="mb-1 flex h-10 w-10 items-center justify-center rounded-xl bg-primary/12 ring-1 ring-primary/20">
+            <UserRound className="h-5 w-5 text-primary" />
+          </div>
+          <DialogTitle className="text-lg">{isEdit ? `Edit ${user?.username}` : "Create user"}</DialogTitle>
           <DialogDescription>
             {isEdit
-              ? "Update limits, expiry and status. Leave password blank to keep it."
-              : "Set 0 for unlimited quota or speed."}
+              ? "Update limits, access and status. Leave password blank to keep it."
+              : "A new VPN account usable on L2TP, SSTP and WireGuard."}
           </DialogDescription>
         </DialogHeader>
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-2">
-              <Label htmlFor="u-username">Username</Label>
-              <Input
-                id="u-username"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                disabled={isEdit}
-                required={!isEdit}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="u-password">Password{isEdit ? " (new)" : ""}</Label>
-              <Input
-                id="u-password"
-                type="text"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder={isEdit ? "unchanged" : ""}
-                required={!isEdit}
-              />
+
+        <form onSubmit={handleSubmit} className="space-y-5">
+          <div className="space-y-3">
+            <SectionTitle icon={KeyRound}>Account</SectionTitle>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="Username" htmlFor="u-username">
+                <Input
+                  id="u-username"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  disabled={isEdit}
+                  required={!isEdit}
+                  autoComplete="off"
+                />
+              </Field>
+              <Field label={isEdit ? "Password (new)" : "Password"} htmlFor="u-password">
+                <div className="flex gap-1.5">
+                  <Input
+                    id="u-password"
+                    type="text"
+                    className="font-mono"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder={isEdit ? "unchanged" : ""}
+                    required={!isEdit}
+                    autoComplete="off"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="shrink-0"
+                    title="Generate password"
+                    onClick={() => setPassword(randomPassword())}
+                  >
+                    <RefreshCw className="h-4 w-4" />
+                  </Button>
+                </div>
+              </Field>
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-3">
-            <div className="space-y-2">
-              <Label htmlFor="u-quota">Quota (GB)</Label>
-              <Input
-                id="u-quota"
-                type="number"
-                min="0"
-                step="0.1"
-                value={quotaGb}
-                onChange={(e) => setQuotaGb(e.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="u-down">Down (Mbps)</Label>
-              <Input
-                id="u-down"
-                type="number"
-                min="0"
-                step="0.5"
-                value={downMbps}
-                onChange={(e) => setDownMbps(e.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="u-up">Up (Mbps)</Label>
-              <Input
-                id="u-up"
-                type="number"
-                min="0"
-                step="0.5"
-                value={upMbps}
-                onChange={(e) => setUpMbps(e.target.value)}
-              />
+          <div className="space-y-3">
+            <SectionTitle icon={Gauge}>Limits</SectionTitle>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <Field label="Quota" hint="GB · 0 = ∞" htmlFor="u-quota">
+                <Input id="u-quota" type="number" min="0" step="0.1" value={quotaGb} onChange={(e) => setQuotaGb(e.target.value)} />
+              </Field>
+              <Field label="Download" hint="Mbps · 0 = ∞" htmlFor="u-down">
+                <Input id="u-down" type="number" min="0" step="0.5" value={downMbps} onChange={(e) => setDownMbps(e.target.value)} />
+              </Field>
+              <Field label="Upload" hint="Mbps · 0 = ∞" htmlFor="u-up">
+                <Input id="u-up" type="number" min="0" step="0.5" value={upMbps} onChange={(e) => setUpMbps(e.target.value)} />
+              </Field>
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-2">
-              <Label htmlFor="u-expiry">Expiry date</Label>
-              <Input
-                id="u-expiry"
-                type="date"
-                value={expiry}
-                onChange={(e) => setExpiry(e.target.value)}
-              />
+          <div className="space-y-3">
+            <SectionTitle icon={ShieldCheck}>Access</SectionTitle>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="Expiry date" hint="empty = never" htmlFor="u-expiry">
+                <Input id="u-expiry" type="date" value={expiry} onChange={(e) => setExpiry(e.target.value)} />
+              </Field>
+              <Field label="Outbound" htmlFor="u-outbound">
+                <Select value={outbound} onValueChange={setOutbound}>
+                  <SelectTrigger id="u-outbound">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="direct">Direct</SelectItem>
+                    <SelectItem value="warp">Cloudflare WARP</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="u-outbound">Outbound</Label>
-              <Select value={outbound} onValueChange={setOutbound}>
-                <SelectTrigger id="u-outbound">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="direct">Direct</SelectItem>
-                  <SelectItem value="warp">Cloudflare WARP</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+            <Field label="Note" htmlFor="u-note">
+              <Input id="u-note" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Optional label…" />
+            </Field>
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="u-note">Note</Label>
-            <Input id="u-note" value={note} onChange={(e) => setNote(e.target.value)} />
-          </div>
-
-          <div className="flex items-center justify-between rounded-md border p-3">
+          <div className="flex items-center justify-between rounded-lg border bg-muted/30 p-3">
             <div>
-              <Label htmlFor="u-active">Active</Label>
-              <p className="text-xs text-muted-foreground">
-                Disabled users cannot connect.
-              </p>
+              <Label htmlFor="u-active" className="text-sm font-medium">
+                Account active
+              </Label>
+              <p className="text-xs text-muted-foreground">Disabled accounts cannot connect.</p>
             </div>
             <Switch id="u-active" checked={isActive} onCheckedChange={setIsActive} />
           </div>

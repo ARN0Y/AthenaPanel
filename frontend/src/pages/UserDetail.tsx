@@ -183,6 +183,7 @@ export function UserDetail() {
   if (!user) return <div className="py-20 text-center text-muted-foreground">User not found.</div>;
 
   const userEvents = events.filter((e) => e.username === user.username).slice(0, 20);
+  const pct = user.quota_bytes > 0 ? (user.used_bytes / user.quota_bytes) * 100 : 0;
 
   return (
     <div>
@@ -215,7 +216,28 @@ export function UserDetail() {
         <Card className="lg:col-span-2">
           <CardHeader className="pb-2"><CardTitle className="text-base">Quota usage</CardTitle></CardHeader>
           <CardContent className="space-y-4">
-            <div className="text-3xl font-bold tabular-nums">{formatBytes(user.used_bytes)}</div>
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <div className="text-3xl font-bold tabular-nums">{formatBytes(user.used_bytes)}</div>
+                <div className="text-xs text-muted-foreground">
+                  of {user.quota_bytes > 0 ? formatBytes(user.quota_bytes) : "unlimited"}
+                  {user.quota_bytes > 0 && ` · ${formatBytes(Math.max(0, user.quota_bytes - user.used_bytes))} left`}
+                </div>
+              </div>
+              {user.quota_bytes > 0 && (
+                <div className="text-right leading-none">
+                  <div
+                    className={cn(
+                      "text-2xl font-bold tabular-nums",
+                      pct >= 100 ? "text-destructive" : pct >= 80 ? "text-warning" : "text-foreground",
+                    )}
+                  >
+                    {Math.round(pct)}%
+                  </div>
+                  <div className="mt-1 text-xs text-muted-foreground">used</div>
+                </div>
+              )}
+            </div>
             <QuotaBar used={user.used_bytes} quota={user.quota_bytes} />
             <Separator />
             <div className="grid gap-3 sm:grid-cols-2">

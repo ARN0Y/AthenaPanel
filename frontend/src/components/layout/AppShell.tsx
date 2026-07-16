@@ -2,13 +2,11 @@ import * as React from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Command as CommandIcon,
   LogOut,
   Menu,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
-  Search,
   Sun,
   UserCog,
 } from "lucide-react";
@@ -118,27 +116,27 @@ export function AppShell() {
           <h1 className="text-lg font-semibold tracking-tight">{title}</h1>
 
           <div className="ml-auto flex items-center gap-2">
-            <button
-              onClick={() => setCmdOpen(true)}
-              className="hidden items-center gap-2 rounded-md border bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted sm:flex"
+            <div
+              className={cn(
+                "hidden items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium ring-1 ring-inset transition-colors sm:flex",
+                health?.xl2tpd && health?.ipsec
+                  ? "bg-success/10 text-success ring-success/25"
+                  : "bg-destructive/10 text-destructive ring-destructive/25",
+              )}
+              title={health?.xl2tpd && health?.ipsec ? "xl2tpd + IPsec running" : "A core service is down"}
             >
-              <Search className="h-3.5 w-3.5" />
-              <span>Search…</span>
-              <kbd className="ml-2 flex items-center gap-0.5 rounded bg-background px-1.5 py-0.5 font-mono text-[10px]">
-                <CommandIcon className="h-2.5 w-2.5" />K
-              </kbd>
-            </button>
-
-            <div className="hidden items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs sm:flex">
-              <span
-                className={cn(
-                  "h-2 w-2 rounded-full",
-                  health?.xl2tpd && health?.ipsec ? "bg-success pulse-dot" : "bg-destructive",
+              <span className="relative flex h-2 w-2">
+                {health?.xl2tpd && health?.ipsec && (
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success/50" />
                 )}
-              />
-              <span className="text-muted-foreground">
-                {health?.xl2tpd && health?.ipsec ? "Services up" : "Check services"}
+                <span
+                  className={cn(
+                    "relative inline-flex h-2 w-2 rounded-full",
+                    health?.xl2tpd && health?.ipsec ? "bg-success" : "bg-destructive",
+                  )}
+                />
               </span>
+              {health?.xl2tpd && health?.ipsec ? "Operational" : "Degraded"}
             </div>
 
             <Button variant="ghost" size="icon" onClick={toggle} title="Toggle theme">

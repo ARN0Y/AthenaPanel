@@ -15,6 +15,11 @@ ipsec.secrets
 *.key
 *_key
 id_rsa*
+# TLS certs / CSRs / acme.sh output dirs (keys + certs — never commit)
+*.cer
+*.crt
+*.csr
+*_ecc/
 # backup bundles / dumps (contain full data + secrets)
 *.dump
 *.zip
