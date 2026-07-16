@@ -8,7 +8,7 @@
 #   sudo SSTP_DOMAIN=sstp.topmeli.com bash setup-sstp.sh
 #
 # Requirements:
-#   * accel-pppd present (built by install.sh).
+#   * accel-pppd present (built by athena-setup.sh).
 #   * The SSTP domain must resolve to a server whose :80 reaches THIS box, so
 #     Let's Encrypt's HTTP-01 challenge succeeds. If the domain points at the
 #     Iran relay, the relay must forward tcp/80 (and tcp/443) to 10.50.50.1.
@@ -34,7 +34,7 @@ fi
 [ -n "$DOMAIN" ] || die "no SSTP domain (set SSTP_ADDRESS in .env or run: SSTP_DOMAIN=sstp.example.com bash setup-sstp.sh)"
 log "SSTP domain: $DOMAIN"
 
-command -v accel-pppd >/dev/null 2>&1 || die "accel-pppd not found — run install.sh first"
+command -v accel-pppd >/dev/null 2>&1 || die "accel-pppd not found — run athena-setup.sh first"
 
 # --- TLS cert (Let's Encrypt, webroot via nginx) --------------------------
 mkdir -p /var/www/html /var/log/accel-ppp

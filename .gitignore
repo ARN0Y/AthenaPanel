@@ -51,3 +51,6 @@ Thumbs.db
 .vscode/
 .claude/
 scratchpad/
+
+# ─── Local AI knowledge graph (contains sensitive ops detail — keep out of git) ──
+ai_memory/
