@@ -149,7 +149,14 @@ async def list_sessions(db: DBSession) -> list[SessionOut]:
             started = started.replace(tzinfo=_dt.timezone.utc)
         uptime = max(0, int((now - started).total_seconds()))
         sstp_prefix = settings.sstp_subnet or "192.168.44."
-        protocol = r.proto or ("SSTP" if (r.peer_ip or "").startswith(sstp_prefix) else "L2TP")
+        raw_prefix = settings.l2tp_raw_subnet or "192.168.45."
+        peer = r.peer_ip or ""
+        if peer.startswith(raw_prefix):
+            # Pool of the raw xl2tpd instance -> this session carries NO IPsec.
+            # The pool is authoritative, so it wins over the stored proto label.
+            protocol = "L2TP-RAW"
+        else:
+            protocol = r.proto or ("SSTP" if peer.startswith(sstp_prefix) else "L2TP")
         out.append(
             SessionOut(
                 username=r.username,

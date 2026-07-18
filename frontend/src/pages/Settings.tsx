@@ -75,6 +75,7 @@ export function Settings() {
   const [serverAddr, setServerAddr] = React.useState("");
   const [sstpAddr, setSstpAddr] = React.useState("");
   const [subAddr, setSubAddr] = React.useState("");
+  const [rawAddr, setRawAddr] = React.useState("");
   const [l2tpOn, setL2tpOn] = React.useState(true);
   const [sstpOn, setSstpOn] = React.useState(false);
   React.useEffect(() => {
@@ -82,12 +83,13 @@ export function Settings() {
       setServerAddr(data.server_address);
       setSstpAddr(data.sstp_address);
       setSubAddr(data.sub_address);
+      setRawAddr(data.l2tp_raw_address || "");
       setL2tpOn(data.l2tp_enabled);
       setSstpOn(data.sstp_enabled);
     }
   }, [data]);
   const settingsMut = useMutation({
-    mutationFn: () => api.updateSettings({ server_address: serverAddr, sstp_address: sstpAddr, sub_address: subAddr, l2tp_enabled: l2tpOn, sstp_enabled: sstpOn }),
+    mutationFn: () => api.updateSettings({ server_address: serverAddr, sstp_address: sstpAddr, sub_address: subAddr, l2tp_raw_address: rawAddr, l2tp_enabled: l2tpOn, sstp_enabled: sstpOn }),
     onSuccess: () => { toast.success("Settings saved"); qc.invalidateQueries({ queryKey: ["settings"] }); },
     onError: (e) => toast.error(e instanceof ApiError ? e.message : "Save failed"),
   });
@@ -167,6 +169,11 @@ export function Settings() {
                 <div className="space-y-1.5">
                   <Label htmlFor="srv">L2TP server address</Label>
                   <Input id="srv" value={serverAddr} onChange={(e) => setServerAddr(e.target.value)} placeholder="lttp.example.com" className="font-mono text-sm" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="rawsrv">L2TP raw address (no IPsec)</Label>
+                  <Input id="rawsrv" value={rawAddr} onChange={(e) => setRawAddr(e.target.value)} placeholder="empty = disabled" className="font-mono text-sm" />
+                  <p className="text-xs text-muted-foreground">Separate entry host for users set to “L2TP raw”. Must differ from the L2TP/IPsec address.</p>
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="sstp">SSTP server address</Label>

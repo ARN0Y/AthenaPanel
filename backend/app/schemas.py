@@ -102,6 +102,7 @@ class UserBase(BaseModel):
     expires_at: datetime | None = None
     note: str = ""
     outbound: str = "direct"
+    l2tp_mode: str = "ipsec"   # "ipsec" (L2TP/IPsec) | "raw" (L2TP without IPsec)
 
 
 class UserCreate(UserBase):
@@ -118,6 +119,7 @@ class UserUpdate(BaseModel):
     expires_at: datetime | None = None
     note: str | None = None
     outbound: str | None = None
+    l2tp_mode: str | None = None
 
 
 class UserOut(BaseModel):
@@ -145,6 +147,7 @@ class UserOut(BaseModel):
     online: bool = False
     sub_token: str = ""  # signed token for the public /sub/<token> link
     outbound: str = "direct"
+    l2tp_mode: str = "ipsec"
 
 
 class BulkAction(BaseModel):
@@ -264,6 +267,7 @@ class SettingsOut(BaseModel):
     server_address: str = ""
     sstp_address: str = ""
     sub_address: str = ""
+    l2tp_raw_address: str = ""   # separate entry for L2TP without IPsec ("" = off)
     l2tp_enabled: bool = True
     sstp_enabled: bool = False
 
@@ -272,6 +276,7 @@ class PanelSettingsUpdate(BaseModel):
     server_address: str | None = Field(default=None, max_length=255)
     sstp_address: str | None = Field(default=None, max_length=255)
     sub_address: str | None = Field(default=None, max_length=255)
+    l2tp_raw_address: str | None = Field(default=None, max_length=255)
     l2tp_enabled: bool | None = None
     sstp_enabled: bool | None = None
 

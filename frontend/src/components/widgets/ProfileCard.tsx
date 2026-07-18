@@ -17,6 +17,16 @@ function buildL2TP(server: string, psk: string, u: User): string {
   ].join("\n");
 }
 
+/** L2TP without IPsec: a different entry host and NO pre-shared key. */
+function buildL2TPRaw(server: string, u: User): string {
+  return [
+    `Server_Address : ${server}`,
+    `L2TP WITHOUT IPsec (no pre-shared key)`,
+    `Username : ${u.username}`,
+    `Password : ${u.password}`,
+  ].join("\n");
+}
+
 function buildSSTP(server: string, u: User): string {
   return [
     `Server_Address : ${server}`,
@@ -55,7 +65,11 @@ export function ProfileCard({ user }: { user: User }) {
   const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: api.settings });
   if (!settings) return null;
 
-  const l2tp = buildL2TP(settings.server_address, settings.vpn_psk, user);
+  const isRaw = (user.l2tp_mode || "ipsec") === "raw";
+  const rawAddr = settings.l2tp_raw_address || "";
+  const l2tp = isRaw
+    ? buildL2TPRaw(rawAddr, user)
+    : buildL2TP(settings.server_address, settings.vpn_psk, user);
   const sstp = buildSSTP(settings.sstp_address, user);
 
   return (
@@ -66,7 +80,15 @@ export function ProfileCard({ user }: { user: User }) {
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
-        {settings.l2tp_enabled && <ConfigBlock title="L2TP/IPsec" text={l2tp} />}
+        {settings.l2tp_enabled &&
+          (isRaw && !rawAddr ? (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-200/90">
+              This account is set to <strong>L2TP raw</strong>, but no raw entry host is configured yet.
+              Set “L2TP raw address” in Settings to hand out its profile.
+            </div>
+          ) : (
+            <ConfigBlock title={isRaw ? "L2TP — no IPsec" : "L2TP/IPsec"} text={l2tp} />
+          ))}
         {settings.sstp_enabled && <ConfigBlock title="SSTP" text={sstp} />}
         {!settings.l2tp_enabled && !settings.sstp_enabled && (
           <p className="text-sm text-muted-foreground">No protocol enabled (see Settings).</p>

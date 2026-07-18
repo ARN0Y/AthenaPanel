@@ -74,6 +74,7 @@ export interface User {
   online: boolean;
   sub_token: string;
   outbound: string;
+  l2tp_mode: string;   // "ipsec" | "raw"
 }
 
 export interface Me {
@@ -232,6 +233,7 @@ export interface ServerSettings {
   server_address: string;
   sstp_address: string;
   sub_address: string;
+  l2tp_raw_address: string;
   l2tp_enabled: boolean;
   sstp_enabled: boolean;
 }
@@ -240,6 +242,7 @@ export interface PanelSettingsPayload {
   server_address?: string;
   sstp_address?: string;
   sub_address?: string;
+  l2tp_raw_address?: string;
   l2tp_enabled?: boolean;
   sstp_enabled?: boolean;
 }
@@ -254,6 +257,7 @@ export interface UserPayload {
   expires_at?: string | null;
   note?: string;
   outbound?: string;
+  l2tp_mode?: string;
 }
 
 export interface OutboundStatus {

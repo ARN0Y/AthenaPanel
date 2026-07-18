@@ -25,6 +25,7 @@ async def get_settings_info(db: AsyncSession = Depends(get_session)):
         server_address=editable["server_address"],
         sstp_address=editable["sstp_address"],
         sub_address=editable["sub_address"],
+        l2tp_raw_address=editable["l2tp_raw_address"],
         l2tp_enabled=appsettings.as_bool(editable["l2tp_enabled"]),
         sstp_enabled=appsettings.as_bool(editable["sstp_enabled"]),
     )

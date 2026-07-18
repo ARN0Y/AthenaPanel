@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Gauge, KeyRound, RefreshCw, ShieldCheck, UserRound } from "lucide-react";
+import { Gauge, KeyRound, RefreshCw, ShieldCheck, ShieldOff, UserRound } from "lucide-react";
 
 import {
   Dialog,
@@ -103,6 +103,7 @@ export function UserFormDialog({
   const [note, setNote] = React.useState("");
   const [isActive, setIsActive] = React.useState(true);
   const [outbound, setOutbound] = React.useState("direct");
+  const [l2tpMode, setL2tpMode] = React.useState("ipsec");
 
   React.useEffect(() => {
     if (!open) return;
@@ -116,6 +117,7 @@ export function UserFormDialog({
       setNote(user.note);
       setIsActive(user.is_active);
       setOutbound(user.outbound || "direct");
+      setL2tpMode(user.l2tp_mode || "ipsec");
     } else {
       setUsername("");
       setPassword(randomPassword());
@@ -126,6 +128,7 @@ export function UserFormDialog({
       setNote("");
       setIsActive(true);
       setOutbound("direct");
+      setL2tpMode("ipsec");
     }
   }, [open, user]);
 
@@ -139,6 +142,7 @@ export function UserFormDialog({
       expires_at: expiry ? new Date(expiry + "T23:59:59Z").toISOString() : null,
       note,
       outbound,
+      l2tp_mode: l2tpMode,
     };
     if (!isEdit) {
       payload.username = username;
@@ -238,6 +242,28 @@ export function UserFormDialog({
                 </Select>
               </Field>
             </div>
+            <Field label="L2TP mode" hint="how the client connects" htmlFor="u-l2tp-mode">
+              <Select value={l2tpMode} onValueChange={setL2tpMode}>
+                <SelectTrigger id="u-l2tp-mode">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="ipsec">L2TP / IPsec — encrypted (recommended)</SelectItem>
+                  <SelectItem value="raw">L2TP raw — without IPsec</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            {l2tpMode === "raw" && (
+              <div className="flex gap-2.5 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-200/90">
+                <ShieldOff className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+                <p>
+                  Raw mode carries traffic <strong>and credentials unencrypted</strong> — only use it when the
+                  customer's ISP blocks IKE/ESP. It connects to a <strong>different server address</strong>,
+                  shown on the user's page after saving.
+                </p>
+              </div>
+            )}
+
             <Field label="Note" htmlFor="u-note">
               <Input id="u-note" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Optional label…" />
             </Field>

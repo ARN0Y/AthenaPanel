@@ -32,11 +32,16 @@ class Settings(BaseSettings):
     server_address: str = "lttp.topmeli.com"   # L2TP/IPsec endpoint
     sstp_address: str = "sstp.topmeli.com"      # SSTP (https) endpoint
     sub_address: str = "sb.topmeli.com:2087"    # subscription page host:port (no scheme)
+    # Raw L2TP (no IPsec) entry. It MUST be a separate host from server_address:
+    # IPsec is negotiated before the user is known, so the two modes cannot share
+    # one endpoint. Empty -> the raw option stays hidden in the panel.
+    l2tp_raw_address: str = ""
     l2tp_enabled: bool = True
     sstp_enabled: bool = False                  # enabled once setup-sstp.sh has run
     # Peer-IP prefix of the SSTP ip-pool (configs/accel-ppp-sstp.conf). Sessions
     # whose client IP starts with this are reported as SSTP, otherwise L2TP.
     sstp_subnet: str = "192.168.44."
+    l2tp_raw_subnet: str = "192.168.45."   # pool of the raw (no-IPsec) xl2tpd instance
 
     # Secret URL prefix the panel is served under (nginx + frontend build).
     # "/" = root (legacy). Set to something like /admin-athena to hide it.

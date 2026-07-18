@@ -15,6 +15,9 @@ DEFAULTS: dict[str, str] = {
     "server_address": settings.server_address,
     "sstp_address": settings.sstp_address,
     "sub_address": settings.sub_address,
+    # Entry host for raw L2TP (no IPsec). Separate endpoint because IPsec is
+    # negotiated before the user is known, so the two modes need distinct hosts.
+    "l2tp_raw_address": settings.l2tp_raw_address,
     "l2tp_enabled": "1" if settings.l2tp_enabled else "0",
     "sstp_enabled": "1" if settings.sstp_enabled else "0",
     # WireGuard (3rd protocol)

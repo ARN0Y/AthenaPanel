@@ -50,6 +50,7 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("total_sessions", "INTEGER NOT NULL DEFAULT 0"),
         ("created_by_admin_id", "INTEGER"),
         ("outbound", "VARCHAR(16) NOT NULL DEFAULT 'direct'"),
+        ("l2tp_mode", "VARCHAR(8) NOT NULL DEFAULT 'ipsec'"),
     ],
     # Self-healing accounting (v2): per-session billing baseline + proto + a
     # debounce counter so a transient sysfs miss never drops a live session.
@@ -79,6 +80,7 @@ async def _migrate_columns(conn) -> None:
 # Postgres has no PRAGMA path; add post-release columns idempotently via DDL.
 _PG_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("users", "outbound", "VARCHAR(16) NOT NULL DEFAULT 'direct'"),
+    ("users", "l2tp_mode", "VARCHAR(8) NOT NULL DEFAULT 'ipsec'"),
 ]
 
 

@@ -109,6 +109,11 @@ async def _rebaseline_open_sessions(db: AsyncSession, username: str) -> None:
             r.base_rx, r.base_tx, r.last_rx, r.last_tx = rx, tx, rx, tx
 
 
+def _norm_mode(value: str | None) -> str:
+    """L2TP mode: 'raw' (no IPsec) — anything else falls back to 'ipsec'."""
+    return "raw" if str(value or "").strip().lower() == "raw" else "ipsec"
+
+
 def _to_out(user: User, online: set[str], names: dict[int, str], live_bytes: int = 0) -> UserOut:
     out = UserOut.model_validate(user)
     out.password = user.password_hash  # plaintext, for the copy-able profile
@@ -121,6 +126,7 @@ def _to_out(user: User, online: set[str], names: dict[int, str], live_bytes: int
     out.created_by_username = names.get(user.created_by_admin_id or -1, "—")
     out.sub_token = make_token(user.id)
     out.outbound = outbound.normalize(user.outbound)
+    out.l2tp_mode = _norm_mode(user.l2tp_mode)
     return out
 
 
@@ -178,6 +184,7 @@ async def create_user(
         expires_at=payload.expires_at,
         note=payload.note or "",
         outbound=outbound.normalize(payload.outbound),
+        l2tp_mode=_norm_mode(payload.l2tp_mode),
         created_by_admin_id=admin.id,
     )
     db.add(user)
@@ -210,6 +217,8 @@ async def update_user(
     data = payload.model_dump(exclude_unset=True)
     if "outbound" in data:
         data["outbound"] = outbound.normalize(data["outbound"])
+    if "l2tp_mode" in data:
+        data["l2tp_mode"] = _norm_mode(data["l2tp_mode"])
     changes: list[str] = []
     new_password = data.pop("password", None)
     if new_password:

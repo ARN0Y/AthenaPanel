@@ -1,4 +1,4 @@
-import { Lock, ShieldCheck, Zap } from "lucide-react";
+import { Lock, ShieldCheck, ShieldOff, Zap } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import type { User } from "@/lib/api";
@@ -8,11 +8,15 @@ export const PROTOCOLS = {
   WIREGUARD: { label: "WireGuard", icon: Zap, cls: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300", title: "WireGuard (UDP/51820)" },
   SSTP: { label: "SSTP", icon: Lock, cls: "border-violet-500/30 bg-violet-500/10 text-violet-300", title: "SSTP over TLS (TCP/443)" },
   L2TP: { label: "L2TP", icon: ShieldCheck, cls: "border-sky-500/30 bg-sky-500/10 text-sky-300", title: "L2TP/IPsec (UDP)" },
+  L2TP_RAW: { label: "L2TP raw", icon: ShieldOff, cls: "border-amber-500/40 bg-amber-500/10 text-amber-300", title: "L2TP WITHOUT IPsec — this session is not encrypted" },
 } as const;
 
 export function protoMeta(protocol: string) {
   const p = (protocol || "").toUpperCase();
-  return p === "SSTP" ? PROTOCOLS.SSTP : p === "WIREGUARD" ? PROTOCOLS.WIREGUARD : PROTOCOLS.L2TP;
+  if (p === "SSTP") return PROTOCOLS.SSTP;
+  if (p === "WIREGUARD") return PROTOCOLS.WIREGUARD;
+  if (p === "L2TP-RAW" || p === "L2TP_RAW") return PROTOCOLS.L2TP_RAW;
+  return PROTOCOLS.L2TP;
 }
 
 /** Protocol pill: WireGuard / SSTP / L2TP — color-coded + icon. */

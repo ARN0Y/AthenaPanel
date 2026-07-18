@@ -91,6 +91,9 @@ class User(Base):
     note: Mapped[str] = mapped_column(Text, default="", nullable=False)
     # Egress routing: "direct" (node's own IP) or "warp" (Cloudflare WARP).
     outbound: Mapped[str] = mapped_column(String(16), default="direct", nullable=False)
+    # "ipsec" = L2TP/IPsec (default, encrypted) | "raw" = L2TP without IPsec.
+    # Selects which entry host the customer is given; see config.l2tp_raw_address.
+    l2tp_mode: Mapped[str] = mapped_column(String(8), default="ipsec", nullable=False)
 
     # Which admin owns/created this user (NULL = legacy/superadmin-owned)
     created_by_admin_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
