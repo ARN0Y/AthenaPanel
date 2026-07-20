@@ -28,8 +28,8 @@ export default function App() {
           <Route element={<SuperadminRoute />}>
             <Route path="/admins" element={<Admins />} />
             <Route path="/audit" element={<Audit />} />
+            <Route path="/settings" element={<Settings />} />
           </Route>
-          <Route path="/settings" element={<Settings />} />
         </Route>
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

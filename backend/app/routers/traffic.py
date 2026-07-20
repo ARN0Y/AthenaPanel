@@ -7,11 +7,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_session
-from ..deps import require_admin
+from ..deps import require_superadmin
 from ..models import TrafficSample
 from ..schemas import TrafficPoint
 
-router = APIRouter(prefix="/api/traffic", tags=["traffic"], dependencies=[Depends(require_admin)])
+# TrafficSample is a NODE-WIDE aggregate (every user's throughput and the total
+# online count) with no per-owner breakdown, so it cannot be scoped — a reseller
+# would read the whole platform's load off it. Superadmin only; the reseller
+# dashboard simply does not render this chart.
+router = APIRouter(prefix="/api/traffic", tags=["traffic"], dependencies=[Depends(require_superadmin)])
 
 
 @router.get("/history", response_model=list[TrafficPoint])

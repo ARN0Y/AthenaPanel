@@ -4,10 +4,10 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import accounting
+from .. import accounting, rbac
 from ..database import get_session
 from ..deps import get_current_admin, require_superadmin
-from ..models import Admin, AuditLog, User
+from ..models import Admin, AuditLog
 from ..schemas import AuditEntry, EventOut
 
 router = APIRouter(prefix="/api", tags=["events"])
@@ -19,12 +19,7 @@ async def events(
     admin: Admin = Depends(get_current_admin),
     db: AsyncSession = Depends(get_session),
 ):
-    items = await accounting.read_events(db, limit)
-    if not admin.is_superadmin:
-        rows = await db.execute(select(User.username).where(User.created_by_admin_id == admin.id))
-        owned = {u for (u,) in rows.all()}
-        items = [e for e in items if e["username"] in owned]
-    return items
+    return await accounting.read_events(db, limit, await rbac.owned_usernames(db, admin))
 
 
 @router.get("/audit", response_model=list[AuditEntry], dependencies=[Depends(require_superadmin)])

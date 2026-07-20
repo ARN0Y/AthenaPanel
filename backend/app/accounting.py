@@ -46,35 +46,42 @@ async def record_session(
     )
 
 
-async def ledger_total_bytes(db: AsyncSession) -> int:
-    """Sum of all closed-session traffic recorded in the ledger."""
-    total = (
-        await db.execute(
-            select(func.coalesce(func.sum(AccountingRecord.bytes_in + AccountingRecord.bytes_out), 0))
-        )
-    ).scalar_one()
-    return int(total or 0)
+async def ledger_total_bytes(db: AsyncSession, usernames: set[str] | None = None) -> int:
+    """Sum of all closed-session traffic recorded in the ledger.
+
+    `usernames=None` means every user (superadmin); a set restricts the sum to
+    those accounts. See rbac — a reseller must never be handed a platform-wide
+    total.
+    """
+    stmt = select(func.coalesce(func.sum(AccountingRecord.bytes_in + AccountingRecord.bytes_out), 0))
+    if usernames is not None:
+        stmt = stmt.where(AccountingRecord.username.in_(usernames or [""]))
+    return int((await db.execute(stmt)).scalar_one() or 0)
 
 
-async def ledger_today_bytes(db: AsyncSession) -> int:
-    """Sum of closed-session traffic whose stop time is today (UTC)."""
+async def ledger_today_bytes(db: AsyncSession, usernames: set[str] | None = None) -> int:
+    """Sum of closed-session traffic whose stop time is today (UTC), scoped."""
     start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    total = (
-        await db.execute(
-            select(func.coalesce(func.sum(AccountingRecord.bytes_in + AccountingRecord.bytes_out), 0))
-            .where(AccountingRecord.stopped_at >= start)
-        )
-    ).scalar_one()
-    return int(total or 0)
+    stmt = (
+        select(func.coalesce(func.sum(AccountingRecord.bytes_in + AccountingRecord.bytes_out), 0))
+        .where(AccountingRecord.stopped_at >= start)
+    )
+    if usernames is not None:
+        stmt = stmt.where(AccountingRecord.username.in_(usernames or [""]))
+    return int((await db.execute(stmt)).scalar_one() or 0)
 
 
-async def read_events(db: AsyncSession, limit: int = 200) -> list[dict]:
-    """Most recent connection-end events (newest first)."""
-    rows = (
-        await db.execute(
-            select(AccountingRecord).order_by(AccountingRecord.stopped_at.desc()).limit(limit)
-        )
-    ).scalars().all()
+async def read_events(db: AsyncSession, limit: int = 200, usernames: set[str] | None = None) -> list[dict]:
+    """Most recent connection-end events (newest first), scoped.
+
+    The filter is applied in SQL, BEFORE the limit: filtering a globally-limited
+    page in Python made a reseller's own events vanish whenever other operators'
+    users were busier than their own.
+    """
+    stmt = select(AccountingRecord).order_by(AccountingRecord.stopped_at.desc())
+    if usernames is not None:
+        stmt = stmt.where(AccountingRecord.username.in_(usernames or [""]))
+    rows = (await db.execute(stmt.limit(limit))).scalars().all()
     return [
         {
             "ts": r.stopped_at,

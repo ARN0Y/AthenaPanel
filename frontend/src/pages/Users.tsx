@@ -83,6 +83,9 @@ export function Users() {
 
   const [search, setSearch] = React.useState("");
   const [status, setStatus] = React.useState<StatusFilter>("all");
+  // Superadmin-only: "which operator provisioned this account?" — the answer is
+  // already on every row, this makes it filterable when there are hundreds.
+  const [creator, setCreator] = React.useState("all");
   const [sortKey, setSortKey] = React.useState<SortKey>("created_at");
   const [sortDir, setSortDir] = React.useState<"asc" | "desc">("desc");
   const [page, setPage] = React.useState(0);
@@ -129,8 +132,14 @@ export function Users() {
     onError: (e) => toast.error(e instanceof ApiError ? e.message : "Bulk action failed"),
   });
 
+  const creators = React.useMemo(
+    () => Array.from(new Set(users.map((u) => u.created_by_username).filter((n) => n && n !== "—"))).sort(),
+    [users],
+  );
+
   const filtered = React.useMemo(() => {
     let list = users.filter((u) => matchesStatus(u, status));
+    if (creator !== "all") list = list.filter((u) => (u.created_by_username || "—") === creator);
     if (search.trim()) {
       const q = search.toLowerCase();
       list = list.filter((u) => u.username.toLowerCase().includes(q) || u.note.toLowerCase().includes(q));
@@ -150,7 +159,7 @@ export function Users() {
       return sortDir === "asc" ? cmp : -cmp;
     });
     return list;
-  }, [users, status, search, sortKey, sortDir]);
+  }, [users, status, creator, search, sortKey, sortDir]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const current = filtered.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
@@ -294,6 +303,20 @@ export function Users() {
                 <SelectItem value="expired">Expired</SelectItem>
               </SelectContent>
             </Select>
+            {isSuperadmin && creators.length > 0 && (
+              <Select value={creator} onValueChange={setCreator}>
+                <SelectTrigger className="w-44">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Any creator</SelectItem>
+                  <SelectItem value="—">Unassigned</SelectItem>
+                  {creators.map((n) => (
+                    <SelectItem key={n} value={n}>Created by {n}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
             <Badge variant="outline" className="ml-auto">{filtered.length} users</Badge>
           </div>
 

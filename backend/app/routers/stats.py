@@ -1,6 +1,5 @@
 """Dashboard stats + health endpoints."""
 
-import asyncio
 import os
 import time
 
@@ -8,10 +7,10 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import accounting, livecache, pppd
+from .. import accounting, livecache, rbac
 from ..config import settings
 from ..database import get_session
-from ..deps import get_current_admin, require_admin
+from ..deps import get_current_admin
 from ..models import Admin, User
 from ..schemas import HealthOut, QuotaUser, StatsOut, TopUser
 
@@ -44,10 +43,8 @@ def _port_bound(port: int) -> bool:
 
 @router.get("/stats", response_model=StatsOut)
 async def stats(admin: Admin = Depends(get_current_admin), db: AsyncSession = Depends(get_session)):
-    scoped = not admin.is_superadmin
-
     def scope(stmt):
-        return stmt.where(User.created_by_admin_id == admin.id) if scoped else stmt
+        return rbac.scope_users(stmt, admin)
 
     total = (await db.execute(scope(select(func.count(User.id))))).scalar_one()
     active = (
@@ -55,17 +52,17 @@ async def stats(admin: Admin = Depends(get_current_admin), db: AsyncSession = De
     ).scalar_one()
 
     users = (await db.execute(scope(select(User)))).scalars().all()
-    owned = {u.username for u in users} if scoped else None
+    owned = None if admin.is_superadmin else {u.username for u in users}
 
     snap = livecache.snapshot()  # from the shared snapshot, no per-request sysfs scan
     all_sessions = snap["sessions"]
     # Live overlay = billing bytes of currently-open PPP sessions. WireGuard is
     # already committed to used_bytes continuously, so livecache excludes it from
     # the overlay (no double-count). Reuse those values instead of recomputing.
-    all_live = snap["live_total"]
-    sessions = all_sessions
-    if owned is not None:
-        sessions = [s for s in all_sessions if s.username in owned]
+    # MUST be scoped: the global live_total would hand a reseller the whole
+    # platform's in-flight traffic through their own dashboard.
+    all_live = rbac.scoped_live_bytes(snap["live_by_user"], owned)
+    sessions = [s for s in all_sessions if rbac.visible(owned, s.username)]
     online = {s.username for s in sessions}
     rx_rate = sum(s.rx_rate_bps for s in sessions)
     tx_rate = sum(s.tx_rate_bps for s in sessions)
@@ -106,12 +103,16 @@ async def stats(admin: Admin = Depends(get_current_admin), db: AsyncSession = De
         for u in top_rows
     ]
 
-    # Total ever = committed billing across all users + current live overlay
-    # (uses preserved used_bytes; immune to log rotation). Today = closed-session
-    # ledger for today + the live (ongoing) overlay.
-    total_used = (await db.execute(select(func.coalesce(func.sum(User.used_bytes), 0)))).scalar_one()
+    # Total ever = committed billing + current live overlay (uses preserved
+    # used_bytes; immune to log rotation). Today = closed-session ledger for
+    # today + the live (ongoing) overlay. BOTH are scoped to the caller: these
+    # two figures were previously computed platform-wide for every role, which
+    # is precisely the "how much did everyone use today" leak.
+    total_used = (
+        await db.execute(scope(select(func.coalesce(func.sum(User.used_bytes), 0))))
+    ).scalar_one()
     traffic_total = int(total_used or 0) + all_live
-    traffic_today = await accounting.ledger_today_bytes(db) + all_live
+    traffic_today = await accounting.ledger_today_bytes(db, owned) + all_live
 
     return StatsOut(
         total_users=total,
@@ -128,6 +129,11 @@ async def stats(admin: Admin = Depends(get_current_admin), db: AsyncSession = De
     )
 
 
+# Open to any admin, deliberately: it is a handful of up/down booleans with no
+# tenant data in it, and the shell header renders an "Operational / Degraded"
+# badge for every operator — a reseller seeing that the node is degraded is the
+# difference between "my customer is lying" and "the server is down". The
+# detailed breakdown lives on the superadmin-only Settings page.
 @router.get("/health", response_model=HealthOut)
 async def health(db: AsyncSession = Depends(get_session)):
     db_ok = True

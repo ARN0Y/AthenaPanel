@@ -19,6 +19,7 @@ import { StatCard } from "@/components/widgets/StatCard";
 import { OnlineDot, ProtocolBadge } from "@/components/widgets/StatusBadge";
 import { QuotaBar } from "@/components/widgets/QuotaBar";
 import { TrafficChart } from "@/components/charts/TrafficChart";
+import { useAuth } from "@/hooks/useAuth";
 import { Gauge } from "@/components/charts/Gauge";
 import { api } from "@/lib/api";
 import { formatBps, formatBytes, formatDuration, formatUptime } from "@/lib/format";
@@ -72,12 +73,17 @@ function SystemPanel() {
 
 export function Dashboard() {
   const [range, setRange] = React.useState("60");
+  // Node-wide throughput and host health describe the whole server, so they are
+  // superadmin-only on the API too. Skip the queries entirely for a reseller —
+  // their stat cards below are already scoped to their own users.
+  const { isSuperadmin } = useAuth();
   const stats = useQuery({ queryKey: ["stats"], queryFn: api.stats, refetchInterval: 5000 });
   const sessions = useQuery({ queryKey: ["sessions"], queryFn: api.listSessions, refetchInterval: 4000 });
   const history = useQuery({
     queryKey: ["traffic-history", range],
     queryFn: () => api.trafficHistory(Number(range)),
     refetchInterval: 15000,
+    enabled: isSuperadmin,
   });
   const s = stats.data;
 
@@ -116,6 +122,7 @@ export function Dashboard() {
         />
       </div>
 
+      {isSuperadmin && (
       <div className="grid gap-6 lg:grid-cols-3">
         <Card className="lg:col-span-2">
           <CardHeader className="flex flex-row items-center justify-between pb-2">
@@ -153,6 +160,7 @@ export function Dashboard() {
 
         <SystemPanel />
       </div>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>

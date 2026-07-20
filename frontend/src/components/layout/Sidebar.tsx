@@ -27,7 +27,10 @@ export const NAV_ITEMS: NavItemDef[] = [
   { to: "/users", label: "Users", icon: Users, super: false },
   { to: "/sessions", label: "Sessions", icon: Radio, super: false },
   { to: "/events", label: "Events", icon: ScrollText, super: false },
-  { to: "/settings", label: "Settings", icon: Settings, super: false },
+  // Settings edits node-wide config (endpoints, PSK, outbounds, backups) and its
+  // write API is superadmin-only — a reseller gets the values they need for
+  // customer profiles through /api/settings, not this page.
+  { to: "/settings", label: "Settings", icon: Settings, super: true },
   { to: "/admins", label: "Admins", icon: Shield, super: true },
   { to: "/audit", label: "Audit Log", icon: ClipboardList, super: true },
 ];

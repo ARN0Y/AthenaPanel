@@ -3,11 +3,18 @@ import { useQuery } from "@tanstack/react-query";
 import {
   Ban,
   CheckCircle2,
+  Database,
+  KeyRound,
+  LogIn,
+  Mail,
   PlusCircle,
   Power,
   RotateCcw,
   Search,
   Settings2,
+  ShieldAlert,
+  ShieldCheck,
+  ShieldPlus,
   Trash2,
   UserCog,
 } from "lucide-react";
@@ -15,6 +22,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Table,
   TableBody,
@@ -35,6 +43,23 @@ const ACTION_META: Record<string, { icon: React.ComponentType<{ className?: stri
   disable_user: { icon: Ban, label: "Disable", variant: "secondary" },
   reset_quota: { icon: RotateCcw, label: "Reset quota", variant: "warning" },
   disconnect: { icon: Power, label: "Disconnect", variant: "warning" },
+  // Operator-level and security events — previously all fell through to the
+  // generic grey pill, which buried the ones that matter most.
+  login: { icon: LogIn, label: "Login", variant: "outline" },
+  login_failed: { icon: ShieldAlert, label: "Login failed", variant: "destructive" },
+  change_password: { icon: KeyRound, label: "Password change", variant: "warning" },
+  create_admin: { icon: ShieldPlus, label: "Create admin", variant: "warning" },
+  update_admin: { icon: ShieldCheck, label: "Update admin", variant: "warning" },
+  delete_admin: { icon: ShieldAlert, label: "Delete admin", variant: "destructive" },
+  create_invite: { icon: Mail, label: "Create invite", variant: "warning" },
+  invite_accept: { icon: ShieldPlus, label: "Invite accepted", variant: "warning" },
+  update_settings: { icon: Settings2, label: "Settings", variant: "warning" },
+  reject_session: { icon: ShieldAlert, label: "Session refused", variant: "destructive" },
+  wg_enable: { icon: CheckCircle2, label: "WireGuard on", variant: "success" },
+  wg_disable: { icon: Ban, label: "WireGuard off", variant: "secondary" },
+  backup_create: { icon: Database, label: "Backup", variant: "outline" },
+  backup_delete: { icon: Trash2, label: "Backup deleted", variant: "destructive" },
+  backup_telegram: { icon: Database, label: "Backup sent", variant: "outline" },
 };
 
 function meta(action: string) {
@@ -50,15 +75,25 @@ export function Audit() {
     refetchInterval: 15000,
   });
   const [search, setSearch] = React.useState("");
+  const [actor, setActor] = React.useState("all");
+
+  const actors = React.useMemo(
+    () => Array.from(new Set(entries.map((e) => e.actor).filter(Boolean))).sort(),
+    [entries],
+  );
 
   const filtered = React.useMemo(() => {
+    let list = entries;
+    if (actor !== "all") list = list.filter((e) => e.actor === actor);
     const q = search.trim().toLowerCase();
-    if (!q) return entries;
-    return entries.filter((e) =>
-      [e.target, e.actor, e.action, e.detail, meta(e.action).label]
-        .some((s) => (s || "").toLowerCase().includes(q)),
-    );
-  }, [entries, search]);
+    if (q) {
+      list = list.filter((e) =>
+        [e.target, e.actor, e.action, e.detail, meta(e.action).label]
+          .some((s) => (s || "").toLowerCase().includes(q)),
+      );
+    }
+    return list;
+  }, [entries, actor, search]);
 
   return (
     <div>
@@ -70,6 +105,15 @@ export function Audit() {
               <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input placeholder="Search action, user or actor…" className="pl-9" value={search} onChange={(e) => setSearch(e.target.value)} />
             </div>
+            <Select value={actor} onValueChange={setActor}>
+              <SelectTrigger className="w-48"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Any operator</SelectItem>
+                {actors.map((a) => (
+                  <SelectItem key={a} value={a}>{a}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <Badge variant="outline" className="ml-auto">{filtered.length} entries</Badge>
           </div>
           <Table>
