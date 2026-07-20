@@ -114,6 +114,69 @@ def session_usage(rx: int, tx: int, base_rx: int, base_tx: int) -> tuple[int, in
     return usage_delta(rx, base_rx), usage_delta(tx, base_tx)
 
 
+def l2tp_engine(peer_ip: str) -> str:
+    """Which L2TP engine served this client: "ipsec", "raw", or "" (neither).
+
+    "" covers SSTP, WireGuard and — deliberately — any address we don't
+    recognise. Mode enforcement is gated on this, so an unknown pool can never
+    cause a session to be refused on a guess.
+    """
+    peer = peer_ip or ""
+    if peer.startswith(settings.l2tp_raw_subnet or "192.168.45."):
+        return "raw"
+    if peer.startswith(settings.l2tp_subnet or "192.168.42."):
+        return "ipsec"
+    return ""
+
+
+def classify_proto(peer_ip: str, stored: str = "") -> str:
+    """Protocol label for a session, derived from the client's address pool.
+
+    The pool is AUTHORITATIVE: every engine hands out from its own range
+    (xl2tpd 192.168.42.x, accel-ppp SSTP 192.168.44.x, the raw no-IPsec xl2tpd
+    192.168.45.x), so the peer IP identifies the engine even when the stored
+    label is stale or predates the raw instance. `stored` is only the fallback
+    for sessions with no peer IP (e.g. an SSTP orphan recovered via accel-cmd).
+
+    This is the SINGLE place the pool prefixes are interpreted — session_up
+    persists this label and list_sessions displays it, so the live table, the
+    accounting ledger and the events view can never disagree.
+    """
+    engine = l2tp_engine(peer_ip)
+    if engine == "raw":
+        return "L2TP-RAW"
+    if engine == "ipsec":
+        return "L2TP"
+    if (peer_ip or "").startswith(settings.sstp_subnet or "192.168.44."):
+        return "SSTP"
+    return stored or "L2TP"
+
+
+def mode_conflict(l2tp_mode: str, peer_ip: str) -> str:
+    """Why this session contradicts the account's L2TP mode ("" = it doesn't).
+
+    Both xl2tpd instances authenticate from the SAME /etc/ppp/chap-secrets, so
+    credentials alone cannot keep an IPsec account off the raw (unencrypted)
+    endpoint — this check is what makes `users.l2tp_mode` an actual control
+    rather than a label. Only the two L2TP engines are gated: SSTP and
+    WireGuard have no IPsec relationship, so they are always allowed.
+
+    Fails OPEN by design: disabled via settings, an unrecognised pool, or a
+    missing user all return "" — a misconfiguration must never mass-disconnect.
+    """
+    if not settings.l2tp_enforce_mode:
+        return ""
+    engine = l2tp_engine(peer_ip)
+    if not engine:
+        return ""
+    want = "raw" if (l2tp_mode or "ipsec").strip().lower() == "raw" else "ipsec"
+    if engine == want:
+        return ""
+    if engine == "raw":
+        return "account is L2TP/IPsec but connected to the raw (no-IPsec) endpoint"
+    return "account is L2TP raw but connected to the L2TP/IPsec endpoint"
+
+
 def pid_from_ifname(ifname: str) -> int:
     """Resolve the pppd PID from /var/run/<ifname>.pid.
 
@@ -148,15 +211,7 @@ async def list_sessions(db: DBSession) -> list[SessionOut]:
         if started.tzinfo is None:
             started = started.replace(tzinfo=_dt.timezone.utc)
         uptime = max(0, int((now - started).total_seconds()))
-        sstp_prefix = settings.sstp_subnet or "192.168.44."
-        raw_prefix = settings.l2tp_raw_subnet or "192.168.45."
-        peer = r.peer_ip or ""
-        if peer.startswith(raw_prefix):
-            # Pool of the raw xl2tpd instance -> this session carries NO IPsec.
-            # The pool is authoritative, so it wins over the stored proto label.
-            protocol = "L2TP-RAW"
-        else:
-            protocol = r.proto or ("SSTP" if peer.startswith(sstp_prefix) else "L2TP")
+        protocol = classify_proto(r.peer_ip, r.proto)
         out.append(
             SessionOut(
                 username=r.username,

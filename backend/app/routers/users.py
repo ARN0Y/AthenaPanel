@@ -26,6 +26,7 @@ _FIELD_LABELS = {
     "is_active": "status",
     "note": "note",
     "outbound": "outbound",
+    "l2tp_mode": "L2TP mode",
     "username": "username",
     "password": "password",
 }

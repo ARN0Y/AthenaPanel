@@ -6,44 +6,21 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { api, type User } from "@/lib/api";
-
-function buildL2TP(server: string, psk: string, u: User): string {
-  return [
-    `Server_Address : ${server}`,
-    `L2TP/IPsec with pre-shared key`,
-    psk,
-    `Username : ${u.username}`,
-    `Password : ${u.password}`,
-  ].join("\n");
-}
-
-/** L2TP without IPsec: a different entry host and NO pre-shared key. */
-function buildL2TPRaw(server: string, u: User): string {
-  return [
-    `Server_Address : ${server}`,
-    `L2TP WITHOUT IPsec (no pre-shared key)`,
-    `Username : ${u.username}`,
-    `Password : ${u.password}`,
-  ].join("\n");
-}
-
-function buildSSTP(server: string, u: User): string {
-  return [
-    `Server_Address : ${server}`,
-    `SSTP (https / port 443)`,
-    `Username : ${u.username}`,
-    `Password : ${u.password}`,
-  ].join("\n");
-}
+import { copyText } from "@/lib/clipboard";
+import { buildProfile } from "@/lib/profile";
 
 function ConfigBlock({ title, text }: { title: string; text: string }) {
   const [copied, setCopied] = React.useState(false);
   const copy = () => {
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      toast.success(`${title} config copied`);
-      setTimeout(() => setCopied(false), 1500);
-    });
+    // copyText, not navigator.clipboard: the panel is also served over plain
+    // HTTP (raw-IP access), where navigator.clipboard is undefined.
+    copyText(text)
+      .then(() => {
+        setCopied(true);
+        toast.success(`${title} config copied`);
+        setTimeout(() => setCopied(false), 1500);
+      })
+      .catch(() => toast.error("Copy failed"));
   };
   return (
     <div className="rounded-lg border bg-muted/30">
@@ -65,12 +42,7 @@ export function ProfileCard({ user }: { user: User }) {
   const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: api.settings });
   if (!settings) return null;
 
-  const isRaw = (user.l2tp_mode || "ipsec") === "raw";
-  const rawAddr = settings.l2tp_raw_address || "";
-  const l2tp = isRaw
-    ? buildL2TPRaw(rawAddr, user)
-    : buildL2TP(settings.server_address, settings.vpn_psk, user);
-  const sstp = buildSSTP(settings.sstp_address, user);
+  const { blocks, rawUnconfigured } = buildProfile(user, settings);
 
   return (
     <Card>
@@ -80,16 +52,15 @@ export function ProfileCard({ user }: { user: User }) {
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
-        {settings.l2tp_enabled &&
-          (isRaw && !rawAddr ? (
-            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-200/90">
-              This account is set to <strong>L2TP raw</strong>, but no raw entry host is configured yet.
-              Set “L2TP raw address” in Settings to hand out its profile.
-            </div>
-          ) : (
-            <ConfigBlock title={isRaw ? "L2TP — no IPsec" : "L2TP/IPsec"} text={l2tp} />
-          ))}
-        {settings.sstp_enabled && <ConfigBlock title="SSTP" text={sstp} />}
+        {rawUnconfigured && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-200/90">
+            This account is set to <strong>L2TP raw</strong>, but no raw entry host is configured yet.
+            Set “L2TP raw address” in Settings to hand out its profile.
+          </div>
+        )}
+        {blocks.map((b) => (
+          <ConfigBlock key={b.title} title={b.title} text={b.text} />
+        ))}
         {!settings.l2tp_enabled && !settings.sstp_enabled && (
           <p className="text-sm text-muted-foreground">No protocol enabled (see Settings).</p>
         )}

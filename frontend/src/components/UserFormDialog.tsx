@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Gauge, KeyRound, RefreshCw, ShieldCheck, ShieldOff, UserRound } from "lucide-react";
 
 import {
@@ -20,7 +21,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { User, UserPayload } from "@/lib/api";
+import { api, type User, type UserPayload } from "@/lib/api";
 import { bytesToGb, gbToBytes, kbpsToMbps, mbpsToKbps } from "@/lib/format";
 
 interface UserFormDialogProps {
@@ -104,6 +105,13 @@ export function UserFormDialog({
   const [isActive, setIsActive] = React.useState(true);
   const [outbound, setOutbound] = React.useState("direct");
   const [l2tpMode, setL2tpMode] = React.useState("ipsec");
+
+  // No raw entry host configured -> raw mode has no reachable endpoint, so the
+  // option stays hidden (the contract stated in config.l2tp_raw_address). Still
+  // shown for a user already ON raw, so an existing setting stays visible/fixable.
+  const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: api.settings });
+  const rawConfigured = !!settings?.l2tp_raw_address?.trim();
+  const showModeSelect = rawConfigured || l2tpMode === "raw";
 
   React.useEffect(() => {
     if (!open) return;
@@ -242,24 +250,27 @@ export function UserFormDialog({
                 </Select>
               </Field>
             </div>
-            <Field label="L2TP mode" hint="how the client connects" htmlFor="u-l2tp-mode">
-              <Select value={l2tpMode} onValueChange={setL2tpMode}>
-                <SelectTrigger id="u-l2tp-mode">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="ipsec">L2TP / IPsec — encrypted (recommended)</SelectItem>
-                  <SelectItem value="raw">L2TP raw — without IPsec</SelectItem>
-                </SelectContent>
-              </Select>
-            </Field>
-            {l2tpMode === "raw" && (
+            {showModeSelect && (
+              <Field label="L2TP mode" hint="how the client connects" htmlFor="u-l2tp-mode">
+                <Select value={l2tpMode} onValueChange={setL2tpMode}>
+                  <SelectTrigger id="u-l2tp-mode">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="ipsec">L2TP / IPsec — encrypted (recommended)</SelectItem>
+                    <SelectItem value="raw">L2TP raw — without IPsec</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+            )}
+            {showModeSelect && l2tpMode === "raw" && (
               <div className="flex gap-2.5 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-200/90">
                 <ShieldOff className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
                 <p>
                   Raw mode carries traffic <strong>and credentials unencrypted</strong> — only use it when the
                   customer's ISP blocks IKE/ESP. It connects to a <strong>different server address</strong>,
-                  shown on the user's page after saving.
+                  shown on the user's page after saving. The mode is <strong>enforced</strong>: a connection to
+                  the other L2TP endpoint is dropped immediately. SSTP and WireGuard are unaffected.
                 </p>
               </div>
             )}

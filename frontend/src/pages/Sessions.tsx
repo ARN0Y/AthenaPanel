@@ -96,6 +96,9 @@ export function Sessions() {
     sessions.filter((s) => (s.protocol || "").toUpperCase() === p).length;
   const breakdown = [
     { key: "L2TP", n: protoCount("L2TP"), dot: "bg-sky-400" },
+    // Raw (no-IPsec) sessions report as "L2TP-RAW" and would otherwise be
+    // counted nowhere, making the chips silently under-report the total.
+    { key: "L2TP raw", n: protoCount("L2TP-RAW"), dot: "bg-amber-400" },
     { key: "SSTP", n: protoCount("SSTP"), dot: "bg-violet-400" },
     { key: "WG", n: protoCount("WIREGUARD"), dot: "bg-emerald-400" },
   ].filter((b) => b.n > 0);

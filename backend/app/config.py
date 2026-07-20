@@ -41,7 +41,14 @@ class Settings(BaseSettings):
     # Peer-IP prefix of the SSTP ip-pool (configs/accel-ppp-sstp.conf). Sessions
     # whose client IP starts with this are reported as SSTP, otherwise L2TP.
     sstp_subnet: str = "192.168.44."
+    l2tp_subnet: str = "192.168.42."       # pool of the main (IPsec) xl2tpd instance
     l2tp_raw_subnet: str = "192.168.45."   # pool of the raw (no-IPsec) xl2tpd instance
+    # Enforce users.l2tp_mode: refuse a session that arrives on the endpoint the
+    # account is NOT set to. Both xl2tpd instances share chap-secrets, so without
+    # this the mode only picks which address is displayed — anyone handed the raw
+    # host could connect unencrypted. Escape hatch: set 0 in .env to fall back to
+    # display-only, no redeploy needed.
+    l2tp_enforce_mode: bool = True
 
     # Secret URL prefix the panel is served under (nginx + frontend build).
     # "/" = root (legacy). Set to something like /admin-athena to hide it.

@@ -4,18 +4,20 @@ Localhost only. Never proxied by nginx (it returns 404 for /api/internal),
 and uvicorn binds 127.0.0.1, so these are unreachable from outside.
 """
 
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import accounting, outbound, pppd
-from ..config import settings
+from .. import accounting, audit, outbound, pppd
 from ..database import get_session
 from ..models import Session as SessionRow
 from ..models import User
-from ..schemas import RateOut, SessionDownIn, SessionUpIn
+from ..schemas import RateOut, SessionDownIn, SessionUpIn, SessionUpOut
+
+log = logging.getLogger("vpn-panel.internal")
 
 router = APIRouter(prefix="/api/internal", tags=["internal"])
 
@@ -41,12 +43,13 @@ async def get_rate(username: str, db: AsyncSession = Depends(get_session)):
     )
 
 
-@router.post("/session-up", dependencies=[Depends(_local_only)])
+@router.post("/session-up", response_model=SessionUpOut, dependencies=[Depends(_local_only)])
 async def session_up(payload: SessionUpIn, db: AsyncSession = Depends(get_session)):
     # Remove any stale row for the same interface, then register.
     await db.execute(delete(SessionRow).where(SessionRow.ifname == payload.ifname))
-    sstp_prefix = settings.sstp_subnet or "192.168.44."
-    proto = "SSTP" if (payload.peer_ip or "").startswith(sstp_prefix) else "L2TP"
+    # Classify from the address pool (shared helper) so a raw, no-IPsec session
+    # is labelled L2TP-RAW in the ledger too, not just in the live view.
+    proto = pppd.classify_proto(payload.peer_ip)
     # Anchor the billing baseline to the interface counter at registration so
     # this session's usage is measured from zero (ignores pre-registration bytes
     # and any counter the iface number carried from a prior session).
@@ -72,9 +75,25 @@ async def session_up(payload: SessionUpIn, db: AsyncSession = Depends(get_sessio
     if user:
         user.last_seen = datetime.now(timezone.utc)
         user.total_sessions = (user.total_sessions or 0) + 1
+
+    # Refuse a session that arrived on the endpoint this account is NOT set to
+    # (see pppd.mode_conflict). The row is registered ANYWAY and only then
+    # refused: ip-up drops the link within a fraction of a second, but whatever
+    # bytes did flow are still finalized against the user's quota, so the reject
+    # path can never become a way to get free traffic. The enforcer re-checks
+    # every cycle, so a session survives even a total ip-up failure by at most
+    # one poll interval.
+    reason = pppd.mode_conflict(user.l2tp_mode, payload.peer_ip) if user else ""
+    if reason:
+        log.warning("refusing %s on %s (%s): %s", payload.username, payload.ifname, payload.peer_ip, reason)
+        await audit.record(
+            db, "reject_session", payload.username,
+            f"{reason} (iface={payload.ifname}, ip={payload.peer_ip})", actor="system",
+        )
+
     await db.commit()
     await outbound.reconcile(db)  # route this client via WARP if its user opted in
-    return {"detail": "registered"}
+    return SessionUpOut(detail="registered", allowed=not reason, reason=reason)
 
 
 @router.post("/session-down", dependencies=[Depends(_local_only)])

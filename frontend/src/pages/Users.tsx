@@ -52,62 +52,13 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { UserFormDialog } from "@/components/UserFormDialog";
 import { api, ApiError, type BulkActionType, type User, type UserPayload } from "@/lib/api";
 import { formatDate, formatRate, relativeTime } from "@/lib/format";
+import { copyText } from "@/lib/clipboard";
+import { isRawMode, profileText } from "@/lib/profile";
 import { useAuth } from "@/hooks/useAuth";
 
 type SortKey = "created_at" | "username" | "used_bytes" | "last_seen" | "expires_at" | "rate_down_kbps";
 type StatusFilter = "all" | "online" | "offline" | "disabled" | "expired";
 const PAGE_SIZE = 12;
-
-function buildProfile(
-  u: User,
-  s: { server_address: string; sstp_address: string; vpn_psk: string; l2tp_enabled: boolean; sstp_enabled: boolean } | undefined,
-): string {
-  if (!s) return "";
-  const blocks: string[] = [];
-  if (s.l2tp_enabled)
-    blocks.push(
-      [`Server_Address : ${s.server_address}`, `L2TP/IPsec with pre-shared key`, s.vpn_psk, `Username : ${u.username}`, `Password : ${u.password}`].join("\n"),
-    );
-  if (s.sstp_enabled)
-    blocks.push(
-      [`Server_Address : ${s.sstp_address}`, `SSTP (https / port 443)`, `Username : ${u.username}`, `Password : ${u.password}`].join("\n"),
-    );
-  return blocks.join("\n\n");
-}
-
-// Clipboard that also works on plain HTTP (navigator.clipboard needs a secure
-// context). Fallback selects a document Range — NOT element focus — so the
-// dropdown's focus-trap can't blank the selection (which made execCommand
-// report success while copying nothing).
-function copyText(text: string): Promise<void> {
-  if (navigator.clipboard && window.isSecureContext) {
-    return navigator.clipboard.writeText(text);
-  }
-  return new Promise((resolve, reject) => {
-    try {
-      const span = document.createElement("span");
-      span.textContent = text;
-      span.style.position = "fixed";
-      span.style.left = "-9999px";
-      span.style.top = "0";
-      span.style.whiteSpace = "pre";
-      document.body.appendChild(span);
-      const sel = window.getSelection();
-      const saved = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
-      sel?.removeAllRanges();
-      const range = document.createRange();
-      range.selectNodeContents(span);
-      sel?.addRange(range);
-      const ok = document.execCommand("copy");
-      sel?.removeAllRanges();
-      if (saved) sel?.addRange(saved);
-      document.body.removeChild(span);
-      ok ? resolve() : reject(new Error("copy failed"));
-    } catch (err) {
-      reject(err);
-    }
-  });
-}
 
 function matchesStatus(u: User, f: StatusFilter): boolean {
   switch (f) {
@@ -246,8 +197,14 @@ export function Users() {
   };
 
   const copyProfile = (u: User) => {
-    const text = buildProfile(u, settings);
-    if (!text) { toast.error("No protocol enabled (Settings)"); return; }
+    const text = profileText(u, settings);
+    if (!text) {
+      // Distinguish "nothing enabled" from "raw user, but no raw host set" —
+      // the second is a one-field fix in Settings, so say so.
+      const raw = isRawMode(u) && settings?.l2tp_enabled && !settings?.l2tp_raw_address?.trim();
+      toast.error(raw ? "Set “L2TP raw address” in Settings first" : "No protocol enabled (Settings)");
+      return;
+    }
     copyText(text).then(() => toast.success(`Profile for ${u.username} copied`)).catch(() => toast.error("Copy failed"));
   };
 

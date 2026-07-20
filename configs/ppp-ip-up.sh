@@ -26,11 +26,37 @@ log() { echo "$(ts) ip-up[$USERNAME/$IFACE] $*" >>"$LOG" 2>/dev/null; }
 PID="$(cat "/var/run/${IFACE}.pid" 2>/dev/null || echo 0)"
 case "$PID" in (*[!0-9]*) PID=0;; esac
 
-# 1) Register the live session with the panel
-curl -fsS --max-time 3 -X POST "$API/session-up" \
+# 1) Register the live session with the panel. The reply carries a verdict:
+#    "allowed":false means this account's l2tp_mode does not match the endpoint
+#    the client dialled (e.g. an IPsec account on the raw, unencrypted port), so
+#    the link must be dropped immediately.
+UP_RESP="$(curl -fsS --max-time 3 -X POST "$API/session-up" \
     -H 'Content-Type: application/json' \
     -d "{\"username\":\"$USERNAME\",\"ifname\":\"$IFACE\",\"peer_ip\":\"$PEERIP\",\"pid\":$PID}" \
-    >>"$LOG" 2>&1 || log "session-up POST failed"
+    2>>"$LOG")" || log "session-up POST failed"
+log "session-up -> ${UP_RESP:-<no response>}"
+
+# FAIL OPEN: only a response that explicitly says allowed:false drops the link.
+# A panel that is down, slow or returns garbage leaves the session untouched —
+# an outage of the panel must never disconnect anyone.
+case "$UP_RESP" in
+    *'"allowed":false'*|*'"allowed": false'*)
+        REASON="$(echo "$UP_RESP" | sed -n 's/.*"reason"[: ]*"\([^"]*\)".*/\1/p')"
+        log "REFUSED (${REASON:-l2tp mode mismatch}) — dropping link"
+        # Re-read the pid file: at this point pppd has certainly written it, even
+        # if it hadn't when we sampled PID above.
+        KPID="$PID"
+        [ "$KPID" -gt 0 ] 2>/dev/null || KPID="$(cat "/var/run/${IFACE}.pid" 2>/dev/null || echo 0)"
+        case "$KPID" in (*[!0-9]*) KPID=0;; esac
+        if [ "$KPID" -gt 0 ] 2>/dev/null; then
+            kill -TERM "$KPID" 2>>"$LOG" && log "sent SIGTERM to pppd $KPID"
+        else
+            # No pid file -> leave it to the panel's enforcer (<=1 poll interval).
+            log "no pid for $IFACE; enforcer will drop it"
+        fi
+        exit 0
+        ;;
+esac
 
 # 2) Fetch rate limits and apply via tc
 RESP="$(curl -fsS --max-time 3 "$API/rate/$USERNAME" 2>/dev/null || true)"

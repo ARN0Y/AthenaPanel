@@ -162,6 +162,22 @@ async def _enforce_once() -> None:
                 why = "quota" if over_quota else f"active={user.is_active} expired={user.is_expired}"
                 log.info("terminated %s: %s (effective=%d quota=%d)",
                          username, why, effective, user.quota_bytes)
+                continue
+
+            # Safety net for l2tp_mode. ip-up drops a wrong-endpoint session in
+            # well under a second, but if that hook ever fails (panel restarting,
+            # curl timeout, pid file not written yet) the session would otherwise
+            # live on — re-checking here bounds that to one poll interval.
+            # Only the OFFENDING interface is dropped, never the whole account:
+            # the same user's SSTP/WireGuard sessions are perfectly legitimate,
+            # so terminate_user() would be far too blunt here.
+            for r in urows:
+                reason = pppd.mode_conflict(user.l2tp_mode, r.peer_ip)
+                if not reason:
+                    continue
+                pppd.kill_pid(r.pid if r.pid and r.pid > 0 else pppd.pid_from_ifname(r.ifname))
+                await _finalize(db, r, user, now)
+                log.warning("dropped %s on %s (%s): %s", username, r.ifname, r.peer_ip, reason)
 
         # 2b) WireGuard peers: kick over-quota/expired/disabled, re-add healthy
         for peer in wg_peers:

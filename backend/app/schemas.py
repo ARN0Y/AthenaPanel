@@ -296,6 +296,14 @@ class SessionUpIn(BaseModel):
     pid: int = 0
 
 
+class SessionUpOut(BaseModel):
+    """Verdict returned to the ip-up hook. `allowed=false` -> drop the link."""
+
+    detail: str = "registered"
+    allowed: bool = True
+    reason: str = ""
+
+
 class SessionDownIn(BaseModel):
     username: str
     ifname: str
