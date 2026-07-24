@@ -1,6 +1,5 @@
 import { Lock, ShieldCheck, ShieldOff, Zap } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import type { User } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -54,15 +53,27 @@ export function OnlineDot({ online }: { online: boolean }) {
   );
 }
 
+/** Soft, tinted status pill — one visual language across every user state. */
+function StatusPill({ tone, children }: { tone: string; children: React.ReactNode }) {
+  return (
+    <span className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-semibold", tone)}>
+      {children}
+    </span>
+  );
+}
+
 export function UserStatusBadge({ user }: { user: User }) {
-  if (!user.is_active) return <Badge variant="secondary">Disabled</Badge>;
-  if (user.is_expired) return <Badge variant="destructive">Expired</Badge>;
-  if (user.quota_exceeded) return <Badge variant="warning">Quota full</Badge>;
+  if (!user.is_active)
+    return <StatusPill tone="border-border bg-muted text-muted-foreground">Disabled</StatusPill>;
+  if (user.is_expired)
+    return <StatusPill tone="border-destructive/30 bg-destructive/10 text-destructive">Expired</StatusPill>;
+  if (user.quota_exceeded)
+    return <StatusPill tone="border-warning/30 bg-warning/10 text-warning">Quota full</StatusPill>;
   if (user.online)
     return (
-      <Badge variant="success" className="gap-1.5">
+      <StatusPill tone="border-success/30 bg-success/10 text-success">
         <OnlineDot online /> Online
-      </Badge>
+      </StatusPill>
     );
-  return <Badge variant="outline">Offline</Badge>;
+  return <StatusPill tone="border-border bg-transparent text-muted-foreground">Offline</StatusPill>;
 }

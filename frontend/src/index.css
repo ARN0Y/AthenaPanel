@@ -97,11 +97,52 @@
     from { opacity: 0; transform: translateY(6px); }
     to { opacity: 1; transform: translateY(0); }
   }
+  /* Dashboard entrance: a gentle staggered rise. Children opt in with
+     .rise + an inline --i (index) so the grid ripples in on mount. */
+  .rise {
+    animation: rise 0.42s cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation-delay: calc(var(--i, 0) * 55ms);
+  }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(10px) scale(0.985); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
   .pulse-dot {
     animation: pulse-dot 1.6s ease-in-out infinite;
   }
   @keyframes pulse-dot {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.35; }
+  }
+  /* Live-signal ring used on the "online now" KPI + throughput header. */
+  .live-ring::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    box-shadow: 0 0 0 0 hsl(var(--success) / 0.5);
+    animation: live-ring 2s ease-out infinite;
+  }
+  @keyframes live-ring {
+    0% { box-shadow: 0 0 0 0 hsl(var(--success) / 0.45); }
+    70%, 100% { box-shadow: 0 0 0 7px hsl(var(--success) / 0); }
+  }
+  /* Faint accent hairline along a card's top edge (KPI tiles). */
+  .accent-top { position: relative; }
+  .accent-top::after {
+    content: "";
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    border-radius: var(--radius) var(--radius) 0 0;
+    background: linear-gradient(90deg, transparent, hsl(var(--tint, var(--primary)) / 0.85), transparent);
+  }
+  .tabnum { font-variant-numeric: tabular-nums; }
+}
+
+/* Honor the OS "reduce motion" setting — freeze all dashboard motion. */
+@media (prefers-reduced-motion: reduce) {
+  .rise, .animate-in-up, .pulse-dot, .live-ring::before {
+    animation: none !important;
   }
 }
