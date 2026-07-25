@@ -108,16 +108,30 @@ cat > /usr/local/sbin/warp-health.sh <<'HC'
 # If WARP is healthy -> install the fwmark rule (warp_users egress via WARP).
 # If WARP is down    -> remove it (warp_users fall back to the main table=direct)
 # and try to bring WARP back.
+#
+# Recovery uses `restart`, never `start`: wg-quick@ is a oneshot unit that sits at
+# "active (exited)" once it has run, so `start` is a no-op. Combined with the old
+# unconditional `wg-quick down`, one transient probe failure used to tear the
+# interface down permanently -- the self-heal was what killed WARP for good.
 set -u
 TABLE=200; MARK=0x2; PRIO=1000
+STATE=/run/warp-health.fails
+FAIL_THRESHOLD=3   # ~90s unhealthy before we rebuild a tunnel that may still be fine
 healthy() { curl -s --max-time 6 --interface warp https://1.1.1.1/cdn-cgi/trace 2>/dev/null | grep -q '^warp=on'; }
 have_rule() { ip rule show | grep -q "fwmark $MARK lookup $TABLE"; }
 if healthy; then
   have_rule || ip rule add fwmark $MARK lookup $TABLE priority $PRIO
+  echo 0 > "$STATE"
 else
+  # drop warp_users to direct straight away, but be slow to rebuild the tunnel
   have_rule && ip rule del fwmark $MARK lookup $TABLE
-  systemctl is-active --quiet wg-quick@warp && wg-quick down warp >/dev/null 2>&1
-  systemctl start wg-quick@warp >/dev/null 2>&1 || true
+  fails=$(( $(cat "$STATE" 2>/dev/null || echo 0) + 1 ))
+  echo "$fails" > "$STATE"
+  if [ "$fails" -ge "$FAIL_THRESHOLD" ]; then
+    logger -t warp-health "WARP unhealthy for $fails checks - restarting wg-quick@warp"
+    systemctl restart wg-quick@warp >/dev/null 2>&1 || true
+    echo 0 > "$STATE"
+  fi
 fi
 HC
 chmod +x /usr/local/sbin/warp-health.sh
