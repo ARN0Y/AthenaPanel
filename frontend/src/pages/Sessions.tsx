@@ -8,11 +8,14 @@ import {
   ChevronsUpDown,
   PowerOff,
   RefreshCw,
+  Search,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -57,10 +60,30 @@ export function Sessions() {
     refetchInterval: 3000,
   });
   const [target, setTarget] = React.useState<string | null>(null);
+  const [query, setQuery] = React.useState("");
   const [sort, setSort] = React.useState<{ key: SortKey; dir: "asc" | "desc" }>({
     key: "down",
     dir: "desc",
   });
+  const searchRef = React.useRef<HTMLInputElement>(null);
+
+  // "/" focuses search, Escape clears it — the table refreshes every 3s, so
+  // being able to pin down one user fast matters more here than elsewhere.
+  React.useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      const typing = el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+      if (e.key === "/" && !typing) {
+        e.preventDefault();
+        searchRef.current?.focus();
+      } else if (e.key === "Escape" && document.activeElement === searchRef.current) {
+        setQuery("");
+        searchRef.current?.blur();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const toggleSort = (key: SortKey) =>
     setSort((s) =>
@@ -69,8 +92,18 @@ export function Sessions() {
         : { key, dir: numericKeys.includes(key) ? "desc" : "asc" },
     );
 
+  // Match on everything visible in a row so "l2tp", "192.168.42", "ppp7" and a
+  // username all work without the operator having to think about which field.
+  const filtered = React.useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return sessions;
+    return sessions.filter((s) =>
+      [s.username, s.protocol, s.ip, s.ifname].some((f) => (f || "").toLowerCase().includes(q)),
+    );
+  }, [sessions, query]);
+
   const sorted = React.useMemo(() => {
-    const arr = [...sessions];
+    const arr = [...filtered];
     arr.sort((a, b) => {
       const av = value(a, sort.key);
       const bv = value(b, sort.key);
@@ -79,7 +112,7 @@ export function Sessions() {
       return 0;
     });
     return arr;
-  }, [sessions, sort]);
+  }, [filtered, sort]);
 
   const disconnectMut = useMutation({
     mutationFn: (username: string) => api.disconnect(username),
@@ -145,7 +178,7 @@ export function Sessions() {
     <div>
       <PageHeader
         title="Live sessions"
-        description="Connected clients · refreshes every 3s · click a column to sort"
+        description="Connected clients · refreshes every 3s · click a column to sort · press / to search"
         actions={
           <Button variant="outline" size="sm" onClick={() => refetch()}>
             <RefreshCw className={`h-4 w-4 ${isFetching ? "animate-spin" : ""}`} /> Refresh
@@ -198,6 +231,31 @@ export function Sessions() {
 
       <Card>
         <CardContent className="p-0">
+          <div className="flex flex-wrap items-center gap-3 border-b p-4">
+            <div className="relative min-w-[220px] flex-1">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                ref={searchRef}
+                placeholder="Search user, protocol, IP or interface…"
+                className="pl-9 pr-9"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+              {query && (
+                <button
+                  type="button"
+                  onClick={() => setQuery("")}
+                  title="Clear"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-sm p-0.5 text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+            <span className="text-xs tabular-nums text-muted-foreground">
+              {query ? `${sorted.length} of ${sessions.length} sessions` : `${sessions.length} sessions`}
+            </span>
+          </div>
           <div className="overflow-x-auto">
             <Table>
               <TableHeader>
@@ -223,7 +281,20 @@ export function Sessions() {
                 {!isLoading && sorted.length === 0 && (
                   <TableRow>
                     <TableCell colSpan={8} className="py-10 text-center text-muted-foreground">
-                      No active sessions
+                      {query ? (
+                        <>
+                          No session matches “{query}”.{" "}
+                          <button
+                            type="button"
+                            onClick={() => setQuery("")}
+                            className="font-medium text-primary hover:underline"
+                          >
+                            Clear search
+                          </button>
+                        </>
+                      ) : (
+                        "No active sessions"
+                      )}
                     </TableCell>
                   </TableRow>
                 )}

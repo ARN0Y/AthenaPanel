@@ -2,6 +2,7 @@ import * as React from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
+  AlertTriangle,
   LogOut,
   Menu,
   Moon,
@@ -34,7 +35,7 @@ const COLLAPSE_KEY = "vpn_sidebar_collapsed";
 export function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { logout } = useAuth();
+  const { logout, me } = useAuth();
   const { theme, toggle } = useTheme();
   const [collapsed, setCollapsed] = React.useState(
     () => localStorage.getItem(COLLAPSE_KEY) === "1",
@@ -62,6 +63,18 @@ export function AppShell() {
     queryFn: api.health,
     refetchInterval: 10000,
   });
+
+  // health is undefined while the first request is in flight — don't flash
+  // "degraded" before we actually know anything.
+  const downServices = health
+    ? (["xl2tpd", "ipsec", "db"] as const).filter((k) => health[k] === false)
+    : [];
+  const degraded = downServices.length > 0;
+
+  const initials = (me?.username ?? "")
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .slice(0, 2)
+    .toUpperCase() || "?";
 
   const title =
     NAV_ITEMS.find((n) => (n.end ? location.pathname === n.to : location.pathname.startsWith(n.to)) && n.to !== "/")
@@ -116,28 +129,19 @@ export function AppShell() {
           <h1 className="text-lg font-semibold tracking-tight">{title}</h1>
 
           <div className="ml-auto flex items-center gap-2">
-            <div
-              className={cn(
-                "hidden items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium ring-1 ring-inset transition-colors sm:flex",
-                health?.xl2tpd && health?.ipsec
-                  ? "bg-success/10 text-success ring-success/25"
-                  : "bg-destructive/10 text-destructive ring-destructive/25",
-              )}
-              title={health?.xl2tpd && health?.ipsec ? "xl2tpd + IPsec running" : "A core service is down"}
-            >
-              <span className="relative flex h-2 w-2">
-                {health?.xl2tpd && health?.ipsec && (
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success/50" />
-                )}
-                <span
-                  className={cn(
-                    "relative inline-flex h-2 w-2 rounded-full",
-                    health?.xl2tpd && health?.ipsec ? "bg-success" : "bg-destructive",
-                  )}
-                />
-              </span>
-              {health?.xl2tpd && health?.ipsec ? "Operational" : "Degraded"}
-            </div>
+            {/* Only surfaced when something is actually wrong — a permanent
+                "everything is fine" badge is noise that trains you to ignore it. */}
+            {degraded && (
+              <div
+                className="flex items-center gap-2 rounded-full bg-destructive/10 px-3 py-1.5 text-xs font-medium text-destructive ring-1 ring-inset ring-destructive/25"
+                title={downServices.length ? `Down: ${downServices.join(", ")}` : "A core service is down"}
+              >
+                <AlertTriangle className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">
+                  {downServices.length ? `${downServices.join(" · ")} down` : "Degraded"}
+                </span>
+              </div>
+            )}
 
             <Button variant="ghost" size="icon" onClick={toggle} title="Toggle theme">
               {theme === "dark" ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
@@ -147,12 +151,17 @@ export function AppShell() {
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost" size="icon" className="rounded-full">
                   <Avatar className="h-8 w-8">
-                    <AvatarFallback>AD</AvatarFallback>
+                    <AvatarFallback>{initials}</AvatarFallback>
                   </Avatar>
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-52">
-                <DropdownMenuLabel>Administrator</DropdownMenuLabel>
+                <DropdownMenuLabel className="pb-1">
+                  <div className="truncate">{me?.username ?? "Account"}</div>
+                  <div className="text-xs font-normal text-muted-foreground">
+                    {me?.role === "superadmin" ? "Superadmin" : "Reseller"}
+                  </div>
+                </DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={() => navigate("/settings")}>
                   <UserCog /> Account & Settings

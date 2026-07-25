@@ -86,6 +86,9 @@ export function Users() {
   // Superadmin-only: "which operator provisioned this account?" — the answer is
   // already on every row, this makes it filterable when there are hundreds.
   const [creator, setCreator] = React.useState("all");
+  // WARP membership is otherwise only visible as a per-row badge, so "who is on
+  // WARP right now?" meant scrolling every page.
+  const [outbound, setOutbound] = React.useState("all");
   const [sortKey, setSortKey] = React.useState<SortKey>("created_at");
   const [sortDir, setSortDir] = React.useState<"asc" | "desc">("desc");
   const [page, setPage] = React.useState(0);
@@ -136,10 +139,12 @@ export function Users() {
     () => Array.from(new Set(users.map((u) => u.created_by_username).filter((n) => n && n !== "—"))).sort(),
     [users],
   );
+  const warpCount = React.useMemo(() => users.filter((u) => u.outbound === "warp").length, [users]);
 
   const filtered = React.useMemo(() => {
     let list = users.filter((u) => matchesStatus(u, status));
     if (creator !== "all") list = list.filter((u) => (u.created_by_username || "—") === creator);
+    if (outbound !== "all") list = list.filter((u) => (u.outbound || "direct") === outbound);
     if (search.trim()) {
       const q = search.toLowerCase();
       list = list.filter((u) => u.username.toLowerCase().includes(q) || u.note.toLowerCase().includes(q));
@@ -159,12 +164,15 @@ export function Users() {
       return sortDir === "asc" ? cmp : -cmp;
     });
     return list;
-  }, [users, status, creator, search, sortKey, sortDir]);
+  }, [users, status, creator, outbound, search, sortKey, sortDir]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const current = filtered.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
 
-  React.useEffect(() => { setPage(0); }, [search, status, sortKey, sortDir]);
+  // `creator` and `outbound` belong here too: changing a filter while on page 3
+  // used to leave you on page 3 of a now-shorter list, i.e. staring at an empty
+  // table with no hint why.
+  React.useEffect(() => { setPage(0); }, [search, status, creator, outbound, sortKey, sortDir]);
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -188,21 +196,30 @@ export function Users() {
     });
 
   const exportCsv = () => {
+    // Quote properly rather than stripping commas: a note containing a quote or
+    // a newline used to shift every following column in the exported file.
+    const cell = (v: string | number) => {
+      const s = String(v ?? "");
+      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
     const rows = [
-      ["username", "status", "used_bytes", "quota_bytes", "down_kbps", "up_kbps", "expires_at", "last_seen", "note"],
+      ["username", "status", "outbound", "used_bytes", "quota_bytes", "down_kbps", "up_kbps", "expires_at", "last_seen", "note"],
       ...filtered.map((u) => [
         u.username,
         u.is_active ? (u.is_expired ? "expired" : "active") : "disabled",
+        u.outbound || "direct",
         u.used_bytes, u.quota_bytes, u.rate_down_kbps, u.rate_up_kbps,
-        u.expires_at ?? "", u.last_seen ?? "", u.note.replace(/,/g, " "),
+        u.expires_at ?? "", u.last_seen ?? "", u.note,
       ]),
     ];
-    const csv = rows.map((r) => r.join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
+    // BOM so Excel opens UTF-8 usernames/notes correctly.
+    const csv = "﻿" + rows.map((r) => r.map(cell).join(",")).join("\r\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "vpn-users.csv";
+    a.href = url;
+    a.download = `vpn-users-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
+    URL.revokeObjectURL(url);
   };
 
   const copyProfile = (u: User) => {
@@ -303,6 +320,18 @@ export function Users() {
                 <SelectItem value="expired">Expired</SelectItem>
               </SelectContent>
             </Select>
+            {warpCount > 0 && (
+              <Select value={outbound} onValueChange={setOutbound}>
+                <SelectTrigger className="w-36">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Any outbound</SelectItem>
+                  <SelectItem value="warp">WARP ({warpCount})</SelectItem>
+                  <SelectItem value="direct">Direct</SelectItem>
+                </SelectContent>
+              </Select>
+            )}
             {isSuperadmin && creators.length > 0 && (
               <Select value={creator} onValueChange={setCreator}>
                 <SelectTrigger className="w-44">
