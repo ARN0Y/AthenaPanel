@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession as DBSession
 
 from . import accel
 from .config import settings
-from .models import Session as SessionRow
+from .models import LOCAL_NODE_ID, Session as SessionRow
 from .schemas import SessionOut
 
 # ifname -> (timestamp, rx_bytes, tx_bytes)
@@ -27,14 +27,27 @@ def iface_exists(ifname: str) -> bool:
     return bool(ifname) and os.path.isdir(f"/sys/class/net/{ifname}")
 
 
+def scan_ppp_ifaces() -> tuple[bool, list[str]]:
+    """(scan_succeeded, live ppp* interfaces) for this host.
+
+    The success flag matters: "the scan failed" and "there are no sessions" both
+    produce an empty list, but only the second one means every session ended. A
+    caller that conflates them would finalize every open session the moment
+    /sys became unreadable, so the two are kept distinguishable here.
+    """
+    try:
+        return True, sorted(
+            n for n in os.listdir("/sys/class/net") if n.startswith("ppp")
+        )
+    except OSError:
+        return False, []
+
+
 def list_ppp_ifaces() -> list[str]:
     """Every live ppp* interface on the host (the ground truth for accounting —
     used to discover sessions that were never registered, e.g. ones that came up
     during a panel-down window, so their traffic is never silently lost)."""
-    try:
-        return sorted(n for n in os.listdir("/sys/class/net") if n.startswith("ppp"))
-    except OSError:
-        return []
+    return scan_ppp_ifaces()[1]
 
 
 def read_iface_bytes(ifname: str) -> tuple[int, int]:
@@ -194,7 +207,12 @@ def pid_from_ifname(ifname: str) -> int:
 
 
 async def list_sessions(db: DBSession) -> list[SessionOut]:
-    rows = (await db.execute(select(SessionRow))).scalars().all()
+    # Local only: everything below reads THIS host's sysfs, so a remote node's
+    # session must not be resolved against a local interface that merely shares
+    # its name — that would report another server's counters as its own.
+    rows = (
+        await db.execute(select(SessionRow).where(SessionRow.node_id == LOCAL_NODE_ID))
+    ).scalars().all()
     now = _dt.datetime.now(_dt.timezone.utc)
     live_ifaces = set()
     out: list[SessionOut] = []
@@ -234,19 +252,31 @@ async def list_sessions(db: DBSession) -> list[SessionOut]:
 
 
 async def online_usernames(db: DBSession) -> set[str]:
-    rows = (await db.execute(select(SessionRow))).scalars().all()
+    rows = (
+        await db.execute(select(SessionRow).where(SessionRow.node_id == LOCAL_NODE_ID))
+    ).scalars().all()
     return {r.username for r in rows if iface_exists(r.ifname)}
 
 
 async def terminate_user(db: DBSession, username: str) -> bool:
-    """Disconnect a user.
+    """Disconnect a user's sessions ON THIS NODE.
 
     accel-ppp has no per-session pppd PID, so the primary path is
     `accel-cmd terminate username <user>`. We also SIGTERM any recorded PID as
     a fallback for the xl2tpd/pppd engine.
+
+    Scoped to the local node, and not merely for tidiness: `pid` is a number
+    that only means anything on the machine that reported it. Sending SIGTERM
+    to a remote node's pid on THIS host would kill whatever local process
+    happens to hold that number.
     """
     rows = (
-        await db.execute(select(SessionRow).where(SessionRow.username == username))
+        await db.execute(
+            select(SessionRow).where(
+                SessionRow.node_id == LOCAL_NODE_ID,
+                SessionRow.username == username,
+            )
+        )
     ).scalars().all()
     for r in rows:
         pid = r.pid if r.pid and r.pid > 0 else pid_from_ifname(r.ifname)

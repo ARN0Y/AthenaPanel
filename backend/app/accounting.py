@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import AccountingRecord
+from .models import LOCAL_NODE_ID, AccountingRecord
 
 
 async def record_session(
@@ -30,10 +30,17 @@ async def record_session(
     bytes_in: int,
     bytes_out: int,
     duration: int,
+    node_id: int = LOCAL_NODE_ID,
 ) -> None:
-    """Append a closed-session row. Caller commits."""
+    """Append a closed-session row. Caller commits.
+
+    `node_id` records which server actually served the session, so per-node
+    revenue/traffic reporting stays possible after the fact — a ledger that
+    only says "a user used 40 GB" cannot be split by location later.
+    """
     db.add(
         AccountingRecord(
+            node_id=node_id,
             username=username,
             proto=proto or "",
             ifname=ifname or "",

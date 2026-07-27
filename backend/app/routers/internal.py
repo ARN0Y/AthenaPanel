@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import accounting, audit, outbound, pppd
 from ..database import get_session
-from ..models import Session as SessionRow
+from ..models import LOCAL_NODE_ID, Session as SessionRow
 from ..models import User
 from ..schemas import RateOut, SessionDownIn, SessionUpIn, SessionUpOut
 
@@ -45,8 +45,15 @@ async def get_rate(username: str, db: AsyncSession = Depends(get_session)):
 
 @router.post("/session-up", response_model=SessionUpOut, dependencies=[Depends(_local_only)])
 async def session_up(payload: SessionUpIn, db: AsyncSession = Depends(get_session)):
-    # Remove any stale row for the same interface, then register.
-    await db.execute(delete(SessionRow).where(SessionRow.ifname == payload.ifname))
+    # Remove any stale row for the same interface, then register. Scoped to this
+    # node: these hooks only ever run on the box that owns the interface, and a
+    # remote node's identically-named ppp0 is a different session entirely.
+    await db.execute(
+        delete(SessionRow).where(
+            SessionRow.node_id == LOCAL_NODE_ID,
+            SessionRow.ifname == payload.ifname,
+        )
+    )
     # Classify from the address pool (shared helper) so a raw, no-IPsec session
     # is labelled L2TP-RAW in the ledger too, not just in the live view.
     proto = pppd.classify_proto(payload.peer_ip)
@@ -58,6 +65,7 @@ async def session_up(payload: SessionUpIn, db: AsyncSession = Depends(get_sessio
     )
     db.add(
         SessionRow(
+            node_id=LOCAL_NODE_ID,
             username=payload.username,
             ifname=payload.ifname,
             peer_ip=payload.peer_ip,
@@ -100,7 +108,12 @@ async def session_up(payload: SessionUpIn, db: AsyncSession = Depends(get_sessio
 async def session_down(payload: SessionDownIn, db: AsyncSession = Depends(get_session)):
     now = datetime.now(timezone.utc)
     row = (
-        await db.execute(select(SessionRow).where(SessionRow.ifname == payload.ifname))
+        await db.execute(
+            select(SessionRow).where(
+                SessionRow.node_id == LOCAL_NODE_ID,
+                SessionRow.ifname == payload.ifname,
+            )
+        )
     ).scalar_one_or_none()
     user = (
         await db.execute(select(User).where(User.username == payload.username))
@@ -136,6 +149,7 @@ async def session_down(payload: SessionDownIn, db: AsyncSession = Depends(get_se
             duration = max(0, int((now - started).total_seconds()))
         await accounting.record_session(
             db,
+            node_id=row.node_id,
             username=row.username,
             proto=row.proto,
             ifname=row.ifname,

@@ -20,7 +20,7 @@ import time
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import Session as SessionRow
+from .models import LOCAL_NODE_ID, Session as SessionRow
 from .models import User, WgPeer
 
 log = logging.getLogger("vpn-panel.outbound")
@@ -59,7 +59,13 @@ async def desired_warp_ips(db: AsyncSession) -> set[str]:
         await db.execute(
             select(SessionRow.peer_ip)
             .join(User, User.username == SessionRow.username)
-            .where(User.outbound == WARP, SessionRow.peer_ip != "")
+            # The ipset lives in THIS host's kernel and only routes this host's
+            # traffic, so it must be built from this node's sessions alone.
+            .where(
+                SessionRow.node_id == LOCAL_NODE_ID,
+                User.outbound == WARP,
+                SessionRow.peer_ip != "",
+            )
         )
     ).all()
     ips.update(_ip(r[0]) for r in rows)

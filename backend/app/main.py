@@ -108,10 +108,21 @@ async def _sync_wireguard() -> None:
         log.info("wireguard: synced %d/%d peers to %s", n, len(peers), wireguard.IFACE)
 
 
+async def _seed_local_node() -> None:
+    """Register this server as node 1 so local sessions have an owner from the
+    very first poll (the enforcer needs it to decide who may close a session)."""
+    from . import nodes
+
+    async with AsyncSessionLocal() as db:
+        await nodes.ensure_local(db)
+        await db.commit()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     try:
+        await _seed_local_node()
         await _seed_superadmin()
         await _import_existing_users()
         await _reconcile_accounting_v2()

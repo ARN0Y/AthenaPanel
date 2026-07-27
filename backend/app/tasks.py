@@ -8,10 +8,13 @@ from datetime import datetime, timezone
 
 from sqlalchemy import delete, select
 
-from . import accel, accounting, appsettings, backups, chap_secrets, livecache, outbound, pppd, telegram, wireguard
+from . import (
+    accel, accounting, appsettings, backups, chap_secrets, livecache, nodes,
+    outbound, pppd, telegram, wireguard,
+)
 from .config import settings
 from .database import AsyncSessionLocal
-from .models import Session as SessionRow
+from .models import LOCAL_NODE_ID, Session as SessionRow
 from .models import UsageSample, User, WgPeer
 
 log = logging.getLogger("vpn-panel.tasks")
@@ -35,6 +38,7 @@ async def _finalize(db, row: SessionRow, user: User | None, now: datetime) -> No
         user.last_seen = now
     await accounting.record_session(
         db,
+        node_id=row.node_id,
         username=row.username,
         proto=row.proto,
         ifname=row.ifname,
@@ -49,12 +53,22 @@ async def _finalize(db, row: SessionRow, user: User | None, now: datetime) -> No
 async def _enforce_once() -> None:
     now = datetime.now(timezone.utc)
     async with AsyncSessionLocal() as db:
-        rows = (await db.execute(select(SessionRow))).scalars().all()
-        rows_by_iface = {r.ifname: r for r in rows}
+        await nodes.ensure_local(db)
+
+        # Local interfaces are only the truth for LOCAL sessions; a remote
+        # node's ppp0 is a different interface that happens to share a name.
+        local_rows = (
+            await db.execute(select(SessionRow).where(SessionRow.node_id == LOCAL_NODE_ID))
+        ).scalars().all()
+        rows_by_iface = {r.ifname: r for r in local_rows}
         active_rows_by_user: dict[str, list[SessionRow]] = {}
 
-        live_ifaces = pppd.list_ppp_ifaces()
+        scan_ok, live_ifaces = pppd.scan_ppp_ifaces()
         live_set = set(live_ifaces)
+        # A failed scan is not "everybody disconnected" — see nodes.py.
+        authoritative = await nodes.authoritative_ids(db, now, scan_ok)
+        if not scan_ok:
+            log.error("ppp interface scan failed; holding all local sessions this cycle")
 
         # --- 1a) Reconcile ORPHANS: live ifaces with no session row (e.g. ones
         # that came up during a panel-down window). Name SSTP orphans via
@@ -69,6 +83,7 @@ async def _enforce_once() -> None:
             uname = smap.get(ifn, "")
             if uname:
                 newrow = SessionRow(
+                    node_id=LOCAL_NODE_ID,
                     username=uname, ifname=ifn, peer_ip="", pid=0,
                     proto="SSTP", base_rx=0, base_tx=0, last_rx=rx, last_tx=tx,
                 )
@@ -76,7 +91,8 @@ async def _enforce_once() -> None:
                 rows_by_iface[ifn] = newrow
                 log.warning("recovered orphan iface %s -> %s (now accounted from full counter)", ifn, uname)
             else:
-                db.add(UsageSample(ts=now, ifname=ifn, username="", proto="", rx_bytes=rx, tx_bytes=tx))
+                db.add(UsageSample(ts=now, node_id=LOCAL_NODE_ID, ifname=ifn,
+                                   username="", proto="", rx_bytes=rx, tx_bytes=tx))
                 log.warning("orphan iface %s unmapped (rx=%d tx=%d) -> flagged in usage_samples", ifn, rx, tx)
 
         # --- 1b) Track live counters, emit the usage_samples time series, and
@@ -89,18 +105,28 @@ async def _enforce_once() -> None:
                 rx, tx = pppd.read_iface_bytes(row.ifname)
                 row.last_rx, row.last_tx = rx, tx
                 row.gone_polls = 0
+                row.stale_since = None  # the node is talking about it again
                 active_rows_by_user.setdefault(row.username, []).append(row)
                 db.add(UsageSample(
-                    ts=now, ifname=row.ifname, username=row.username,
+                    ts=now, node_id=row.node_id, ifname=row.ifname, username=row.username,
                     proto=row.proto, rx_bytes=rx, tx_bytes=tx,
                 ))
-            else:
+            elif row.node_id in authoritative:
+                # The owning node is reporting and does not list this interface,
+                # so it really is gone. Debounce a single missed read, then close.
                 row.gone_polls = (row.gone_polls or 0) + 1
                 if row.gone_polls >= 2:
                     user = (
                         await db.execute(select(User).where(User.username == row.username))
                     ).scalar_one_or_none()
                     await _finalize(db, row, user, now)
+            elif row.stale_since is None:
+                # The node went quiet. Hold the row untouched: its bytes stay
+                # uncommitted and its base is preserved, so when the node comes
+                # back the session simply resumes instead of being billed twice.
+                row.stale_since = now
+                log.warning("node %d silent; holding session %s/%s (not finalizing)",
+                            row.node_id, row.username, row.ifname)
 
         # --- 1.5) WireGuard accounting --------------------------------------
         # Peers are perpetual (no connect/disconnect), so WG bytes flow
@@ -129,7 +155,8 @@ async def _enforce_once() -> None:
                 datetime.fromtimestamp(d["handshake"], timezone.utc) if d["handshake"] > 0 else None
             )
             db.add(UsageSample(
-                ts=now, ifname=f"wg:{peer.address}"[:32], username=(u.username if u else ""),
+                ts=now, node_id=LOCAL_NODE_ID, ifname=f"wg:{peer.address}"[:32],
+                username=(u.username if u else ""),
                 proto="wg", rx_bytes=d["rx"], tx_bytes=d["tx"],
             ))
 

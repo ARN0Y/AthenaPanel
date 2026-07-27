@@ -8,7 +8,7 @@ from .. import audit, chap_secrets, livecache, outbound, pppd
 from ..subtoken import make_token
 from ..database import get_session
 from ..deps import get_current_admin
-from ..models import Admin, User
+from ..models import LOCAL_NODE_ID, Admin, User
 from ..models import Session as SessionRow
 from ..schemas import BulkAction, UserCreate, UserOut, UserUpdate
 
@@ -100,9 +100,19 @@ async def _live_by_user(db: AsyncSession) -> dict[str, int]:
 async def _rebaseline_open_sessions(db: AsyncSession, username: str) -> None:
     """On quota reset, move each open session's billing base up to the current
     counter so the live overlay restarts from zero (without losing the iface
-    counter or disconnecting the session)."""
+    counter or disconnecting the session).
+
+    Local sessions only — the rebaseline is done by reading this host's sysfs.
+    Rebaselining a session held on a remote node has to be a command sent to
+    that node, since only it can read its own counters (Phase 2).
+    """
     rows = (
-        await db.execute(select(SessionRow).where(SessionRow.username == username))
+        await db.execute(
+            select(SessionRow).where(
+                SessionRow.node_id == LOCAL_NODE_ID,
+                SessionRow.username == username,
+            )
+        )
     ).scalars().all()
     for r in rows:
         if pppd.iface_exists(r.ifname):

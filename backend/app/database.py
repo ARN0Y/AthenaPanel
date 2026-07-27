@@ -59,7 +59,11 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("base_rx", "BIGINT NOT NULL DEFAULT 0"),
         ("base_tx", "BIGINT NOT NULL DEFAULT 0"),
         ("gone_polls", "INTEGER NOT NULL DEFAULT 0"),
+        ("node_id", "INTEGER NOT NULL DEFAULT 1"),
+        ("stale_since", "DATETIME"),
     ],
+    "usage_samples": [("node_id", "INTEGER NOT NULL DEFAULT 1")],
+    "accounting": [("node_id", "INTEGER NOT NULL DEFAULT 1")],
 }
 
 
@@ -78,9 +82,20 @@ async def _migrate_columns(conn) -> None:
 
 
 # Postgres has no PRAGMA path; add post-release columns idempotently via DDL.
+#
+# Every entry below is a constant DEFAULT, which Postgres 11+ applies as
+# metadata only — no table rewrite, no long lock, even on the 12M-row
+# usage_samples hypertable.
 _PG_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("users", "outbound", "VARCHAR(16) NOT NULL DEFAULT 'direct'"),
     ("users", "l2tp_mode", "VARCHAR(8) NOT NULL DEFAULT 'ipsec'"),
+    # Multi-node: every session / sample / ledger row records which server
+    # produced it. Existing rows are all from this server, so DEFAULT 1 is the
+    # correct backfill and needs no data migration.
+    ("sessions", "node_id", "INTEGER NOT NULL DEFAULT 1"),
+    ("sessions", "stale_since", "TIMESTAMPTZ"),
+    ("usage_samples", "node_id", "INTEGER NOT NULL DEFAULT 1"),
+    ("accounting", "node_id", "INTEGER NOT NULL DEFAULT 1"),
 ]
 
 
@@ -89,6 +104,38 @@ async def _migrate_columns_pg(conn) -> None:
         await conn.exec_driver_sql(
             f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {ddl}"
         )
+
+
+async def _migrate_indexes_pg(conn) -> None:
+    """Re-shape indexes that changed meaning when nodes were introduced.
+
+    `sessions.ifname` used to be globally unique, which is wrong the moment a
+    second node exists: every node has its own ppp0. Uniqueness moves to
+    (node_id, ifname). The table holds ~one row per live session, so this is
+    effectively instant.
+
+    Deliberately NOT done here: widening usage_samples' primary key from
+    (ts, ifname) to (ts, node_id, ifname). That rebuilds the index on every
+    hypertable chunk over 12M+ rows, and (ts, ifname) is still unique while
+    node 1 is the only node. It must happen before the first remote node
+    reports — see the note on UsageSample.node_id.
+    """
+    await conn.exec_driver_sql(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_node_ifname "
+        "ON sessions (node_id, ifname)"
+    )
+    # Drop the old global-unique index only AFTER the replacement exists, so the
+    # table is never briefly unprotected against duplicate interfaces.
+    await conn.exec_driver_sql("DROP INDEX IF EXISTS ix_sessions_ifname")
+    await conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_sessions_ifname ON sessions (ifname)"
+    )
+    await conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_sessions_node_id ON sessions (node_id)"
+    )
+    await conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_accounting_node_id ON accounting (node_id)"
+    )
 
 
 async def _setup_timescale(conn) -> None:
@@ -117,6 +164,7 @@ async def init_db() -> None:
         if settings.is_postgres:
             await conn.run_sync(Base.metadata.create_all)
             await _migrate_columns_pg(conn)
+            await _migrate_indexes_pg(conn)
             await _setup_timescale(conn)
         else:
             await conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
