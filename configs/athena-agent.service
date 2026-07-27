@@ -1,0 +1,28 @@
+[Unit]
+# Reports what this node is doing to the panel. NOT in the data path: pppd,
+# xl2tpd, accel-ppp and kernel WireGuard carry the traffic, so stopping,
+# restarting or upgrading this unit disconnects nobody. That property is what
+# makes agent updates cheap, and it must not be given up.
+Description=Athena node agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+# ATHENA_HUB, ATHENA_TOKEN and ATHENA_WG_IFACE live here, mode 0600.
+EnvironmentFile=/etc/athena-agent.env
+ExecStart=/usr/local/bin/athena-agent
+Restart=always
+RestartSec=5
+# The agent reconnects on its own with backoff, so systemd restarting it is a
+# last resort rather than the normal recovery path.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
