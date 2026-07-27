@@ -156,6 +156,11 @@ class Node(Base):
     # to decide anything, so a lying or stale agent cannot affect billing.
     hostname: Mapped[str] = mapped_column(String(128), default="", nullable=False)
     kernel: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    # The node's most recent report, as JSON. One row per node, overwritten —
+    # this is current state, not a time series. Persisted rather than kept in
+    # the hub's memory so that any process (the panel, an operator, the Phase 1
+    # verifier) can read what the node last said without being the hub.
+    last_report: Mapped[str] = mapped_column(Text, default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     note: Mapped[str] = mapped_column(Text, default="", nullable=False)
 

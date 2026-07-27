@@ -1,0 +1,31 @@
+[Unit]
+# Control plane for termination nodes. Separate from vpn-panel on purpose:
+# grpc.aio must never be able to stop the panel from booting, and the two have
+# very different load shapes (bursty HTTP vs. one permanent stream per node).
+Description=Athena node control plane (gRPC hub)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/vpn-panel/backend
+EnvironmentFile=/opt/vpn-panel/.env
+# Loopback by default. Exposing the hub publicly is a Phase 2 step and should
+# go through nginx (grpc_pass) so it inherits the TLS setup already on this box.
+Environment=NODEHUB_LISTEN=127.0.0.1:50051
+ExecStart=/opt/vpn-panel/backend/venv/bin/python -m app.nodehub
+Restart=always
+RestartSec=5
+# The hub holds no session state; a restart just makes agents reconnect.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# It reads the database and talks to loopback. Nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

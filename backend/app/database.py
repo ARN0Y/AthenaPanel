@@ -116,6 +116,7 @@ _PG_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("nodes", "token", "VARCHAR(64) NOT NULL DEFAULT ''"),
     ("nodes", "hostname", "VARCHAR(128) NOT NULL DEFAULT ''"),
     ("nodes", "kernel", "VARCHAR(128) NOT NULL DEFAULT ''"),
+    ("nodes", "last_report", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 

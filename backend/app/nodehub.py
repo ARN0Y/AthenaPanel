@@ -17,6 +17,7 @@ anything is allowed to act on them.
 """
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -38,9 +39,9 @@ PROTOCOL_VERSION = 1
 # (90s) or a healthy node would look silent between reports.
 REPORT_INTERVAL_SECONDS = 15
 
-# The last report from each node, in memory only. Phase 1 uses it purely for
-# comparison against locally-read truth; it is deliberately not persisted,
-# because persisting numbers nothing acts on is just noise in the DB.
+# Newest report per node, kept in memory for the hub's own use. The same
+# payload is written to Node.last_report so that any other process can read it
+# — the hub's memory is not a place other tools can look.
 LAST_REPORT: dict[int, dict] = {}
 
 
@@ -91,8 +92,8 @@ async def _record_report(node_id: int, report) -> None:
     makes "silent node" a fact rather than a guess.
     """
     now = datetime.now(timezone.utc)
-    LAST_REPORT[node_id] = {
-        "at": now,
+    LAST_REPORT[node_id] = payload = {
+        "at": now.isoformat(),
         "sent_at_unix_ms": report.sent_at_unix_ms,
         "ppp": [
             {
@@ -130,6 +131,7 @@ async def _record_report(node_id: int, report) -> None:
         node = await db.get(Node, node_id)
         if node is not None:
             node.last_seen_at = now
+            node.last_report = json.dumps(payload, separators=(",", ":"))
             await db.commit()
 
 
