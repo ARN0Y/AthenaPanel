@@ -296,5 +296,14 @@ class WgPeer(Base):
     last_rx: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     last_tx: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     last_handshake: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # A WireGuard peer is perpetual: it has no connect/disconnect, and it
+    # re-handshakes about every two minutes. These three give it the same
+    # "current session" notion L2TP/SSTP get from ip-up, so the live view can
+    # show how long this peer has actually been online and how much IT used —
+    # rather than seconds-since-last-rekey and a lifetime byte total.
+    # NULL online_since = the peer is currently offline.
+    online_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    session_base_rx: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    session_base_tx: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)

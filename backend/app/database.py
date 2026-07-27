@@ -68,6 +68,11 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     ],
     "usage_samples": [("node_id", "INTEGER NOT NULL DEFAULT 1")],
     "accounting": [("node_id", "INTEGER NOT NULL DEFAULT 1")],
+    "wg_peers": [
+        ("online_since", "DATETIME"),
+        ("session_base_rx", "BIGINT NOT NULL DEFAULT 0"),
+        ("session_base_tx", "BIGINT NOT NULL DEFAULT 0"),
+    ],
 }
 
 
@@ -100,6 +105,13 @@ _PG_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("sessions", "stale_since", "TIMESTAMPTZ"),
     ("usage_samples", "node_id", "INTEGER NOT NULL DEFAULT 1"),
     ("accounting", "node_id", "INTEGER NOT NULL DEFAULT 1"),
+    # Gives a WireGuard peer a "current session" so the live view can show real
+    # connected time and this-session bytes instead of rekey age and a lifetime
+    # total. Existing peers start with no session; the enforcer anchors one on
+    # the next offline->online edge it observes.
+    ("wg_peers", "online_since", "TIMESTAMPTZ"),
+    ("wg_peers", "session_base_rx", "BIGINT NOT NULL DEFAULT 0"),
+    ("wg_peers", "session_base_tx", "BIGINT NOT NULL DEFAULT 0"),
 ]
 
 

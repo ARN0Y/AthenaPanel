@@ -80,6 +80,9 @@ async def _reconcile_accounting_v2() -> None:
     async with AsyncSessionLocal() as db:
         if await db.get(AppSetting, "accounting_v2_migrated") is not None:
             return
+        # Intentionally not node-scoped: this is the one-shot v1->v2 accounting
+        # reconciliation, already marked done in production and only reachable
+        # on a database that predates nodes entirely.
         rows = (await db.execute(select(SessionRow))).scalars().all()
         committed_open: dict[str, int] = {}
         for r in rows:

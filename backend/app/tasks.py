@@ -19,6 +19,18 @@ from .models import UsageSample, User, WgPeer
 
 log = logging.getLogger("vpn-panel.tasks")
 
+# A WireGuard peer counts as online while its last handshake is this recent.
+# WireGuard rekeys roughly every 2 minutes, so the window must comfortably
+# exceed that or a healthy peer would flap offline between rekeys.
+WG_ONLINE_WINDOW = 180
+
+
+def _aware(ts: datetime | None) -> datetime | None:
+    """Treat a naive timestamp as UTC (SQLite round-trips lose the tzinfo)."""
+    if ts is not None and ts.tzinfo is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts
+
 
 def _duration(started, now) -> int:
     if started is None:
@@ -150,10 +162,33 @@ async def _enforce_once() -> None:
             u = wg_users.get(peer.user_id)
             if u and delta > 0:
                 u.used_bytes += delta
-            peer.last_rx, peer.last_tx = d["rx"], d["tx"]
-            peer.last_handshake = (
+
+            # Detect the offline -> online edge and anchor a "session" to it.
+            # The base is taken from last_rx/last_tx, NOT the counter we just
+            # read: those are the values from the previous cycle, when the peer
+            # was still offline and therefore not moving bytes. Using them keeps
+            # the traffic from this cycle inside the session instead of
+            # discarding up to one poll interval of it.
+            hs = _aware(
                 datetime.fromtimestamp(d["handshake"], timezone.utc) if d["handshake"] > 0 else None
             )
+            prev_hs = _aware(peer.last_handshake)
+            is_online = hs is not None and (now - hs).total_seconds() < WG_ONLINE_WINDOW
+            was_online = prev_hs is not None and (now - prev_hs).total_seconds() < WG_ONLINE_WINDOW
+            # `peer.online_since is None` also catches a peer that was already
+            # connected when this code first ran (or when it was deployed):
+            # such a peer never produces an offline->online edge, so without
+            # adopting it here it would stay unanchored forever and keep
+            # displaying its lifetime byte total. Its start time is then only
+            # known to be "at least since the last handshake".
+            if is_online and (not was_online or peer.online_since is None):
+                peer.online_since = hs or now
+                peer.session_base_rx, peer.session_base_tx = peer.last_rx, peer.last_tx
+            elif not is_online and peer.online_since is not None:
+                peer.online_since = None
+
+            peer.last_rx, peer.last_tx = d["rx"], d["tx"]
+            peer.last_handshake = hs
             db.add(UsageSample(
                 ts=now, node_id=LOCAL_NODE_ID, ifname=f"wg:{peer.address}"[:32],
                 username=(u.username if u else ""),
@@ -281,17 +316,36 @@ async def _snapshot_once() -> None:
             names = dict((await db.execute(select(User.id, User.username))).all())
             now_e = time.time()
             live_keys = set()
+            now_dt = datetime.now(timezone.utc)
             for peer in wg_peers:
                 d = dump.get(peer.public_key)
-                if not d or d["handshake"] <= 0 or (now_e - d["handshake"]) >= 180:
+                if not d or d["handshake"] <= 0 or (now_e - d["handshake"]) >= WG_ONLINE_WINDOW:
                     continue
                 ifn = f"wg:{peer.address}"
                 live_keys.add(ifn)
                 rxr, txr = _wg_rate(ifn, d["rx"], d["tx"])
+                # How long this peer has been online, NOT how long since its
+                # last rekey — WireGuard re-handshakes every ~2 minutes, so the
+                # handshake age is a sawtooth that never exceeds ~120s no matter
+                # how long the user has actually been connected.
+                started = _aware(peer.online_since)
+                if started is not None:
+                    uptime = max(0, int((now_dt - started).total_seconds()))
+                else:
+                    # The enforcer has not observed the edge yet (it runs every
+                    # 30s). Fall back to handshake age rather than showing zero.
+                    uptime = max(0, int(now_e - d["handshake"]))
+                # Bytes for THIS online period, measured the same way a ppp
+                # session is (counter minus its base, multiplier applied), so
+                # the column means the same thing for every protocol instead of
+                # showing WireGuard's lifetime total next to per-session values.
+                in_b, out_b = pppd.session_usage(
+                    d["rx"], d["tx"], peer.session_base_rx, peer.session_base_tx
+                )
                 sessions.append(SessionOut(
                     username=names.get(peer.user_id, ""), ifname=ifn, ip=peer.address,
-                    protocol="WireGuard", uptime_seconds=max(0, int(now_e - d["handshake"])),
-                    rx_bytes=d["rx"], tx_bytes=d["tx"], rx_rate_bps=rxr, tx_rate_bps=txr, state="active",
+                    protocol="WireGuard", uptime_seconds=uptime,
+                    rx_bytes=in_b, tx_bytes=out_b, rx_rate_bps=rxr, tx_rate_bps=txr, state="active",
                 ))
             for k in list(_wg_rate_cache.keys()):
                 if k not in live_keys:
