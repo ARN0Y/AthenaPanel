@@ -19,13 +19,13 @@ proto-py:
 	$(VENV_PY) -m grpc_tools.protoc -Iproto \
 	    --python_out=$(PY_OUT) --grpc_python_out=$(PY_OUT) \
 	    --pyi_out=$(PY_OUT) $(PROTO)
-	@# grpc_tools emits package-absolute imports; make them relative so the
-	@# stubs work as a normal sub-package of app/.
-	@sed -i 's/^from athena\.node\.v1 import /from . import /' $(PY_OUT)/*_pb2_grpc.py
-	@sed -i 's/^from athena\.node\.v1 import /from . import /' $(PY_OUT)/*_pb2.py 2>/dev/null || true
-	@mv -f $(PY_OUT)/athena/node/v1/*.py  $(PY_OUT)/ 2>/dev/null || true
+	@# protoc mirrors the proto package as directories; flatten it first, THEN
+	@# rewrite the package-absolute imports it emitted into relative ones, so
+	@# the stubs behave like a normal sub-package of app/.
+	@mv -f $(PY_OUT)/athena/node/v1/*.py  $(PY_OUT)/
 	@mv -f $(PY_OUT)/athena/node/v1/*.pyi $(PY_OUT)/ 2>/dev/null || true
 	@rm -rf $(PY_OUT)/athena
+	@sed -i 's/^from athena\.node\.v1 import /from . import /' $(PY_OUT)/*_pb2_grpc.py
 	@echo "python stubs -> $(PY_OUT)"
 
 proto-go:
