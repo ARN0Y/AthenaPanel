@@ -15,7 +15,7 @@ import logging
 import secrets
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import LOCAL_NODE_ID, Node
@@ -27,6 +27,27 @@ log = logging.getLogger("vpn-panel.nodes")
 # ledger row, while dropping authority too eagerly is what causes double
 # billing. Must stay comfortably above the agent's report interval.
 STALE_AFTER_SECONDS = 90
+
+
+async def _sync_id_sequence(db: AsyncSession) -> None:
+    """Point the id sequence past the highest existing node id.
+
+    Node 1 is inserted with an EXPLICIT id so the constant LOCAL_NODE_ID always
+    means this server. Postgres does not advance a serial's sequence for an
+    explicit insert, so the next auto-assigned id would be 1 again and collide.
+    Cheap, idempotent, and a no-op on SQLite.
+    """
+    if db.bind is None or db.bind.dialect.name != "postgresql":
+        return
+    try:
+        await db.execute(
+            text(
+                "SELECT setval(pg_get_serial_sequence('nodes','id'), "
+                "GREATEST((SELECT COALESCE(MAX(id), 1) FROM nodes), 1))"
+            )
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("could not sync the nodes id sequence")
 
 
 async def ensure_local(db: AsyncSession) -> Node:
@@ -45,6 +66,7 @@ async def ensure_local(db: AsyncSession) -> Node:
         )
         db.add(node)
         await db.flush()
+        await _sync_id_sequence(db)
         log.info("registered the local server as node %d", LOCAL_NODE_ID)
     return node
 
@@ -58,6 +80,9 @@ async def register(
     db: AsyncSession, *, name: str, address: str = "", note: str = ""
 ) -> Node:
     """Create a remote node and mint its token. Caller commits."""
+    # Guard against a sequence left behind by node 1's explicit-id insert, and
+    # against any database restored from a dump where it was never advanced.
+    await _sync_id_sequence(db)
     node = Node(
         name=name,
         is_local=False,
