@@ -1,0 +1,117 @@
+syntax = "proto3";
+
+// Control-plane contract between the panel (hub) and a termination node.
+//
+// Two rules this file exists to enforce, both learned before it was written:
+//
+//  1. THE NODE DIALS OUT. The hub never connects to a node. A node may sit
+//     behind NAT, change address, or have its IP burned and replaced; none of
+//     that should require the hub to know how to reach it. One inbound port on
+//     the hub, none on the node.
+//
+//  2. COUNTERS ON THE WIRE ARE ABSOLUTE, NEVER DELTAS. The hub keeps the
+//     watermark and computes the difference itself. A resent report is then a
+//     no-op instead of double-counting, and a dropped one heals on the next
+//     report instead of losing traffic forever. This is the single most
+//     important property of the protocol -- deltas over an unreliable link
+//     silently corrupt billing.
+//
+// The stream is bidirectional from day one even though the hub only replies
+// with acks today: Phase 2 adds commands (disconnect, sync users, quota
+// credit) as new variants of HubMessage.payload, which old agents ignore and
+// new ones handle. Fields are only ever added, never renumbered or reused.
+
+package athena.node.v1;
+
+option go_package = "github.com/ARN0Y/AthenaPanel/agent/pb;pb";
+
+service NodeHub {
+  // Opened once by the agent and held open. Reports flow up, commands down.
+  rpc Connect(stream AgentMessage) returns (stream HubMessage);
+}
+
+// ---------------------------------------------------------------- agent -> hub
+
+message AgentMessage {
+  oneof payload {
+    Hello hello = 1;   // exactly once, first
+    Report report = 2; // then periodically, forever
+  }
+}
+
+message Hello {
+  // Per-node shared secret. Also sent as gRPC metadata; carried here too so a
+  // stream can be authenticated from its first frame regardless of transport.
+  string token = 1;
+  string agent_version = 2;
+  // Bumped only on an incompatible change. The hub refuses a version it cannot
+  // speak rather than silently misreading it.
+  uint32 protocol_version = 3;
+  string hostname = 4;
+  string os = 5;
+  string kernel = 6;
+}
+
+message Report {
+  int64 sent_at_unix_ms = 1;
+  Host host = 2;
+  repeated PppSession ppp = 3;
+  repeated WgPeer wg = 4;
+}
+
+message Host {
+  uint64 uptime_seconds = 1;
+  double load1 = 2;
+  uint64 mem_total_bytes = 3;
+  uint64 mem_available_bytes = 4;
+  // Whether the node's own VPN engines are alive. A node that reports but
+  // whose engines are down is a different failure from one that is silent.
+  bool xl2tpd_ok = 5;
+  bool ipsec_ok = 6;
+  bool accel_ppp_ok = 7;
+  bool wireguard_ok = 8;
+}
+
+// One live ppp interface. ABSOLUTE kernel counters since the interface came up.
+message PppSession {
+  string ifname = 1;
+  uint64 rx_bytes = 2; // from the client  (the user's upload)
+  uint64 tx_bytes = 3; // toward the client (the user's download)
+  // Empty when the agent cannot map the interface to an account. The hub must
+  // treat that as "unknown", never as "no user" -- silently dropping unmapped
+  // traffic is how usage goes missing.
+  string username = 4;
+  string peer_ip = 5;
+  int32 pid = 6;       // meaningful ONLY on the node that reported it
+}
+
+// One WireGuard peer. ABSOLUTE counters since the peer was added.
+message WgPeer {
+  string public_key = 1;
+  uint64 rx_bytes = 2;
+  uint64 tx_bytes = 3;
+  int64 last_handshake_unix = 4; // 0 = never
+  string address = 5;
+}
+
+// ---------------------------------------------------------------- hub -> agent
+
+message HubMessage {
+  oneof payload {
+    Welcome welcome = 1;
+    Ack ack = 2;
+  }
+}
+
+message Welcome {
+  int32 node_id = 1;
+  string node_name = 2;
+  uint32 report_interval_seconds = 3;
+  uint32 protocol_version = 4;
+}
+
+message Ack {
+  int64 received_at_unix_ms = 1;
+  bool ok = 2;
+  string detail = 3;
+}

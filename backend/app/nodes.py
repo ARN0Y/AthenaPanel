@@ -12,6 +12,7 @@ first remote node exists rather than after the first wrong invoice.
 """
 
 import logging
+import secrets
 from datetime import datetime, timedelta
 
 from sqlalchemy import select
@@ -45,6 +46,29 @@ async def ensure_local(db: AsyncSession) -> Node:
         db.add(node)
         await db.flush()
         log.info("registered the local server as node %d", LOCAL_NODE_ID)
+    return node
+
+
+def new_token() -> str:
+    """A node's stream credential. 43 chars of urlsafe base64 (256 bits)."""
+    return secrets.token_urlsafe(32)
+
+
+async def register(
+    db: AsyncSession, *, name: str, address: str = "", note: str = ""
+) -> Node:
+    """Create a remote node and mint its token. Caller commits."""
+    node = Node(
+        name=name,
+        is_local=False,
+        enabled=True,
+        address=address,
+        note=note,
+        token=new_token(),
+    )
+    db.add(node)
+    await db.flush()
+    log.info("registered node %d (%s)", node.id, node.name)
     return node
 
 

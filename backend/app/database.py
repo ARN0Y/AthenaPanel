@@ -112,6 +112,10 @@ _PG_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("wg_peers", "online_since", "TIMESTAMPTZ"),
     ("wg_peers", "session_base_rx", "BIGINT NOT NULL DEFAULT 0"),
     ("wg_peers", "session_base_tx", "BIGINT NOT NULL DEFAULT 0"),
+    # Node control plane.
+    ("nodes", "token", "VARCHAR(64) NOT NULL DEFAULT ''"),
+    ("nodes", "hostname", "VARCHAR(128) NOT NULL DEFAULT ''"),
+    ("nodes", "kernel", "VARCHAR(128) NOT NULL DEFAULT ''"),
 ]
 
 
