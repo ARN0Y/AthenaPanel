@@ -1,5 +1,6 @@
 """Async SQLAlchemy engine / session setup + lightweight migrations."""
 
+import logging
 from collections.abc import AsyncGenerator
 
 from sqlalchemy import text
@@ -11,6 +12,9 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase
 
 from .config import settings
+
+
+log = logging.getLogger("vpn-panel.database")
 
 
 class Base(DeclarativeBase):
@@ -99,14 +103,41 @@ _PG_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
 ]
 
 
-async def _migrate_columns_pg(conn) -> None:
+async def _try_ddl(conn, sql: str) -> bool:
+    """Run one migration statement; never let it abort startup.
+
+    A panel that refuses to boot is strictly worse than a panel with one
+    missing column: the API, the UI and the enforcer all stop, the ppp hooks
+    start timing out, and sessions that connect meanwhile are never registered.
+    A failed step is logged loudly and the rest continue, so the server keeps
+    serving while an operator fixes the cause.
+
+    Learned the hard way: `usage_samples` was owned by the panel role but its
+    TimescaleDB chunks were still owned by `postgres`, so ALTER TABLE raised
+    InsufficientPrivilege and took the whole service down on deploy.
+
+    The caller must supply an AUTOCOMMIT connection — inside a transaction the
+    first failure would poison every statement after it.
+    """
+    try:
+        await conn.exec_driver_sql(sql)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("SCHEMA MIGRATION STEP FAILED, continuing startup: %s -> %s", sql, exc)
+        return False
+
+
+async def _migrate_columns_pg(conn) -> int:
+    failed = 0
     for table, name, ddl in _PG_COLUMN_MIGRATIONS:
-        await conn.exec_driver_sql(
-            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {ddl}"
+        ok = await _try_ddl(
+            conn, f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {ddl}"
         )
+        failed += 0 if ok else 1
+    return failed
 
 
-async def _migrate_indexes_pg(conn) -> None:
+async def _migrate_indexes_pg(conn) -> int:
     """Re-shape indexes that changed meaning when nodes were introduced.
 
     `sessions.ifname` used to be globally unique, which is wrong the moment a
@@ -120,22 +151,19 @@ async def _migrate_indexes_pg(conn) -> None:
     node 1 is the only node. It must happen before the first remote node
     reports — see the note on UsageSample.node_id.
     """
-    await conn.exec_driver_sql(
+    failed = 0
+    # Create the replacement BEFORE dropping the old one, so the table is never
+    # briefly unprotected against duplicate interfaces.
+    for sql in (
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_node_ifname "
-        "ON sessions (node_id, ifname)"
-    )
-    # Drop the old global-unique index only AFTER the replacement exists, so the
-    # table is never briefly unprotected against duplicate interfaces.
-    await conn.exec_driver_sql("DROP INDEX IF EXISTS ix_sessions_ifname")
-    await conn.exec_driver_sql(
-        "CREATE INDEX IF NOT EXISTS ix_sessions_ifname ON sessions (ifname)"
-    )
-    await conn.exec_driver_sql(
-        "CREATE INDEX IF NOT EXISTS ix_sessions_node_id ON sessions (node_id)"
-    )
-    await conn.exec_driver_sql(
-        "CREATE INDEX IF NOT EXISTS ix_accounting_node_id ON accounting (node_id)"
-    )
+        "ON sessions (node_id, ifname)",
+        "DROP INDEX IF EXISTS ix_sessions_ifname",
+        "CREATE INDEX IF NOT EXISTS ix_sessions_ifname ON sessions (ifname)",
+        "CREATE INDEX IF NOT EXISTS ix_sessions_node_id ON sessions (node_id)",
+        "CREATE INDEX IF NOT EXISTS ix_accounting_node_id ON accounting (node_id)",
+    ):
+        failed += 0 if await _try_ddl(conn, sql) else 1
+    return failed
 
 
 async def _setup_timescale(conn) -> None:
@@ -161,15 +189,27 @@ async def init_db() -> None:
     from . import models  # noqa: F401  (register models)
 
     async with engine.begin() as conn:
-        if settings.is_postgres:
-            await conn.run_sync(Base.metadata.create_all)
-            await _migrate_columns_pg(conn)
-            await _migrate_indexes_pg(conn)
-            await _setup_timescale(conn)
-        else:
+        if not settings.is_postgres:
             await conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
-            await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(Base.metadata.create_all)
+        if not settings.is_postgres:
             await _migrate_columns(conn)
+
+    if settings.is_postgres:
+        # AUTOCOMMIT so one failed statement cannot poison the rest: inside a
+        # transaction Postgres rejects every following statement with "current
+        # transaction is aborted", turning a single bad step into a total
+        # migration failure.
+        async with engine.connect() as conn:
+            conn = await conn.execution_options(isolation_level="AUTOCOMMIT")
+            failed = await _migrate_columns_pg(conn)
+            failed += await _migrate_indexes_pg(conn)
+            await _setup_timescale(conn)
+        if failed:
+            log.error(
+                "%d schema migration step(s) failed — the panel is running but "
+                "may be missing columns or indexes; fix and restart", failed
+            )
 
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
