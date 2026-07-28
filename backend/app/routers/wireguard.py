@@ -172,6 +172,15 @@ async def get_config(user_id: int, admin: Admin = Depends(get_current_admin), db
             or await wireguard.server_pubkey()
         )
     if not endpoint:
+        if node is not None and not node.is_local:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Node '{node.name}' has no WireGuard external proxy set. "
+                    "Set it on the Nodes page — the panel-wide address points at "
+                    "the master and would send this customer to the wrong server."
+                ),
+            )
         raise HTTPException(status_code=400, detail="WG endpoint not set — Settings: set the relay host:port")
     if not server_pub:
         raise HTTPException(status_code=400, detail="WG server public key unavailable")

@@ -79,14 +79,25 @@ def effective_endpoints(node: Node | None, app_settings: dict) -> dict[str, str]
     would both fail to connect and expose infrastructure that is meant to stay
     behind the entry.
 
-    A node with no external proxy of its own inherits the panel-wide setting.
-    That is deliberate rather than lazy: it is what lets node 1 keep serving the
-    accounts that predate nodes without anything being copied into it, so there
-    is exactly one place to change an address that every node shares.
+    The panel-wide setting is inherited ONLY by the local node. That is what
+    lets every account predating nodes keep working with nothing copied into
+    them, and one place to change an address node 1 serves.
+
+    A REMOTE node does not inherit it, and returns "" instead. The panel-wide
+    address is a relay pointing at the master; a single host:port can only
+    forward to one backend, so handing it to a customer served elsewhere sends
+    them to the wrong server — a config that resolves, connects, authenticates
+    against the wrong account list and fails, with nothing anywhere saying why.
+    An empty address is a visible gap the operator can fix; a plausible wrong
+    one is a support ticket that never gets diagnosed.
     """
+    is_local = node is None or node.is_local
+
     def pick(node_value: str | None, fallback_key: str) -> str:
         value = (node_value or "").strip()
-        return value or (app_settings.get(fallback_key) or "").strip()
+        if value:
+            return value
+        return (app_settings.get(fallback_key) or "").strip() if is_local else ""
 
     wg = pick(node.ext_wg_endpoint if node else "", "wg_endpoint")
     # wg_endpoint is host:port panel-wide, while a node carries host and port

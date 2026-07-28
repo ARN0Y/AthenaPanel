@@ -74,17 +74,29 @@ function Engine({ label, ok, port }: { label: string; ok: boolean; port?: number
   );
 }
 
-/** One customer-facing address. Empty is not a gap — it means the node inherits
- *  the panel-wide setting, which is how node 1 keeps working untouched. */
-function ProxyLine({ label, value }: { label: string; value: string }) {
+/** One customer-facing address.
+ *
+ *  Empty means two different things and the card must not blur them. On node 1
+ *  it inherits the panel-wide setting, which is how every pre-node account keeps
+ *  working. On any other node nothing is inherited — the panel-wide address is a
+ *  relay pointing at the master, and a single host:port cannot forward to two
+ *  backends — so empty there is a real gap that stops customers connecting. */
+function ProxyLine({ label, value, isLocal }: { label: string; value: string; isLocal: boolean }) {
   return (
     <div className="flex items-baseline gap-1.5 truncate">
       <span className="shrink-0 text-muted-foreground/70">{label}</span>
       {value ? (
         <span className="truncate">{value}</span>
-      ) : (
+      ) : isLocal ? (
         <span className="truncate italic text-muted-foreground/50" title="Falls back to the panel-wide setting">
           panel default
+        </span>
+      ) : (
+        <span
+          className="truncate italic text-warning"
+          title="Not set. Customers on this node have no address to connect to — the panel-wide one points at the master."
+        >
+          not set
         </span>
       )}
     </div>
@@ -276,10 +288,10 @@ function NodeCard({
             external proxy — what customers dial
           </div>
           <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 font-mono text-[11px]">
-            <ProxyLine label="L2TP" value={node.ext_l2tp_address} />
-            <ProxyLine label="raw" value={node.ext_l2tp_raw_address} />
-            <ProxyLine label="SSTP" value={node.ext_sstp_address} />
-            <ProxyLine label="WG" value={node.ext_wg_endpoint} />
+            <ProxyLine label="L2TP" value={node.ext_l2tp_address} isLocal={node.is_local} />
+            <ProxyLine label="raw" value={node.ext_l2tp_raw_address} isLocal={node.is_local} />
+            <ProxyLine label="SSTP" value={node.ext_sstp_address} isLocal={node.is_local} />
+            <ProxyLine label="WG" value={node.ext_wg_endpoint} isLocal={node.is_local} />
           </div>
         </div>
 
