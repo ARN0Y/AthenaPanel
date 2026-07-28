@@ -167,3 +167,61 @@ func TestOvershootIsOneTickOfTraffic(t *testing.T) {
 	}
 	t.Fatal("never terminated")
 }
+
+func TestPidsDoesNotDisturbCreditState(t *testing.T) {
+	// Reading pids used to go through Evaluate, which is a decision function
+	// with side effects: it marks users as awaiting an answer. Enumerating one
+	// user's processes must not change what the loop decides about another.
+	l := New()
+	l.AddSession("bob", "ppp0", 100, 0, 0)
+	l.AddSession("carol", "ppp1", 200, 0, 0)
+	l.ApplyGrant("carol", Grant{ID: 1, GrantedBytes: 100 * MB, ThresholdBytes: 20 * MB})
+	l.Observe(obs(map[string]struct{ Rx, Tx uint64 }{"ppp1": {Rx: 90 * MB}}))
+
+	if pids := l.Pids("bob"); len(pids) != 1 || pids[0] != 100 {
+		t.Fatalf("bob's pids: %v", pids)
+	}
+	if n := l.SessionCount("carol"); n != 1 {
+		t.Fatalf("carol should hold one session, got %d", n)
+	}
+	// carol is over her threshold, so the FIRST Evaluate must still ask for
+	// more. (bob appears too, with INITIAL — he has no grant yet.)
+	verdicts := l.Evaluate(true)
+	found := false
+	for _, v := range verdicts {
+		if v.Username != "carol" {
+			continue
+		}
+		found = true
+		if v.Decision != RequestMore || v.Reason != "THRESHOLD" {
+			t.Fatalf("carol's verdict was disturbed: %+v", v)
+		}
+	}
+	if !found {
+		t.Fatalf("reading pids consumed carol's pending request: %+v", verdicts)
+	}
+}
+
+func TestSessionCountSeesPidlessSessions(t *testing.T) {
+	// accel-ppp owns its SSTP sessions and reports no pid. Such a session is
+	// still a session; if it did not count, a user whose account was deleted
+	// would never be evicted on sync.
+	l := New()
+	l.AddSession("dave", "ppp0", 0, 0, 0)
+	if len(l.Pids("dave")) != 0 {
+		t.Fatal("a pid of 0 must not be offered as a kill target")
+	}
+	if n := l.SessionCount("dave"); n != 1 {
+		t.Fatalf("session count must still be 1, got %d", n)
+	}
+}
+
+func TestPidsOfUnknownUserIsEmpty(t *testing.T) {
+	l := New()
+	if pids := l.Pids("nobody"); len(pids) != 0 {
+		t.Fatalf("unknown user must yield no pids, got %v", pids)
+	}
+	if n := l.SessionCount("nobody"); n != 0 {
+		t.Fatalf("unknown user must hold no sessions, got %d", n)
+	}
+}

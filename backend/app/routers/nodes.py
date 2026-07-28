@@ -6,18 +6,23 @@ discovered from the local kernel, not from anything an agent claims.
 """
 
 import json
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import audit, livecache, nodes as nodes_mod, pki, sysmon, wireguard
+from .. import (
+    audit, livecache, nodes as nodes_mod, nodesessions, pki, sysmon, wireguard,
+)
 from ..database import get_session
 from ..deps import require_superadmin
 from ..models import LOCAL_NODE_ID, Node, Session as SessionRow
 from ..schemas import NodeCreate, NodeCreated, NodeOut, NodeUpdate
 from .stats import _port_bound
+
+log = logging.getLogger("vpn-panel.nodes-api")
 
 router = APIRouter(
     prefix="/api/nodes", tags=["nodes"], dependencies=[Depends(require_superadmin)]
@@ -53,9 +58,16 @@ def _local_snapshot() -> tuple[dict, dict]:
     which is not "we don't know", it is "we know and threw it away". Shaped like
     a report so the rest of the summariser does not care where it came from.
     """
-    live = livecache.snapshot().get("online") or []
-    ppp = [s for s in live if getattr(s, "protocol", "") != "WireGuard"]
-    wg = [s for s in live if getattr(s, "protocol", "") == "WireGuard"]
+    # "sessions", not "online": the latter is a set of usernames, and asking a
+    # string for its .protocol quietly filed every WireGuard peer under ppp.
+    # Scoped to node 1 as well — the snapshot now carries every node's sessions,
+    # so an unscoped count would credit this card with other machines' tunnels.
+    live = [
+        s for s in (livecache.snapshot().get("sessions") or [])
+        if getattr(s, "node_id", LOCAL_NODE_ID) == LOCAL_NODE_ID
+    ]
+    ppp = [s for s in live if s.protocol != "WireGuard"]
+    wg = [s for s in live if s.protocol == "WireGuard"]
     try:
         sysinfo = sysmon.collect()
         host = {
@@ -299,21 +311,38 @@ async def delete_node(
     if node.is_local or node.id == LOCAL_NODE_ID:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "The local node cannot be deleted")
 
-    # Sessions carry accounting state; deleting a node out from under live ones
-    # would strand rows nothing can ever finalize. Disable it, let its sessions
-    # drain, then delete.
+    # Deleting a node out from under LIVE sessions strands rows nothing can ever
+    # close, so a node that is still reporting must be drained first. A node
+    # that has gone silent is a different case entirely: its rows are held, not
+    # live, and nothing will ever resume them — refusing there would make a dead
+    # node permanently undeletable. Their bytes are already billed (the credit
+    # loop commits as it goes), so dropping them loses no money, only a display.
     live = (
         await db.execute(
             select(func.count(SessionRow.id)).where(SessionRow.node_id == node_id)
         )
     ).scalar_one()
-    if live:
+    reporting = False
+    if node.last_seen_at is not None:
+        seen = node.last_seen_at
+        if seen.tzinfo is None:
+            seen = seen.replace(tzinfo=timezone.utc)
+        reporting = (
+            datetime.now(timezone.utc) - seen
+        ).total_seconds() < nodes_mod.STALE_AFTER_SECONDS
+    if live and reporting:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             f"{live} session(s) still on this node. Disable it and wait for them to end.",
         )
 
     name = node.name
+    dropped = await nodesessions.drop_node(db, node_id)
+    if dropped:
+        log.warning(
+            "deleting silent node %d (%s): dropped %d held session row(s)",
+            node_id, name, dropped,
+        )
     await db.delete(node)
     await audit.record(db, "delete_node", name, f"id={node_id}", actor=admin.username)
     await db.commit()

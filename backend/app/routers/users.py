@@ -309,7 +309,7 @@ async def update_user(
     await db.refresh(user)
     await chap_secrets.rewrite(db)
     if not user.enabled_for_auth:
-        await pppd.terminate_user(db, user.username)
+        await nodes_mod.terminate_user(db, user)
     await outbound.reconcile(db)  # apply outbound change to an already-online user
     online = livecache.snapshot()["online"]
     names = await _admin_names(db)
@@ -353,7 +353,7 @@ async def toggle_user(user_id: int, admin: Admin = Depends(get_current_admin), d
     await db.refresh(user)
     await chap_secrets.rewrite(db)
     if not user.enabled_for_auth:
-        await pppd.terminate_user(db, user.username)
+        await nodes_mod.terminate_user(db, user)
     online = livecache.snapshot()["online"]
     names = await _admin_names(db)
     return _to_out(user, online, names, 0, await _node_ctx(db))
@@ -384,7 +384,7 @@ async def bulk_action(
             user.used_bytes = 0
             await _rebaseline_open_sessions(db, user.username)
         elif payload.action == "delete":
-            await pppd.terminate_user(db, user.username)
+            await nodes_mod.terminate_user(db, user)
             await db.delete(user)
 
     await audit.record(db, f"bulk_{payload.action}", f"{len(affected)} users", ", ".join(affected[:20]), actor=admin.username)

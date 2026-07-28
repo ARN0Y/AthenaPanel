@@ -4,10 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import audit, livecache, pppd
+from .. import audit, livecache, nodes as nodes_mod, pppd
 from ..database import get_session
 from ..deps import get_current_admin
-from ..models import Admin, User
+from ..models import LOCAL_NODE_ID, Admin, User
 from ..schemas import SessionOut
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -37,9 +37,27 @@ async def disconnect(username: str, admin: Admin = Depends(get_current_admin), d
     allowed = await _owned_usernames(db, admin)
     if allowed is not None and username not in allowed:
         raise HTTPException(status_code=403, detail="Not your user")
-    ok = await pppd.terminate_user(db, username)
-    if not ok:
-        raise HTTPException(status_code=400, detail="Could not terminate session")
-    await audit.record(db, "disconnect", username, actor=admin.username)
+
+    user = (
+        await db.execute(select(User).where(User.username == username))
+    ).scalar_one_or_none()
+    if user is None:
+        # No account, but sessions can outlive one (an orphan recovered by the
+        # enforcer). Falling back to the local kill keeps that case working.
+        await pppd.terminate_user(db, username)
+        node_id, immediate = LOCAL_NODE_ID, True
+    else:
+        node_id = user.node_id or LOCAL_NODE_ID
+        immediate = await nodes_mod.terminate_user(db, user)
+
+    # A queued disconnect is reported as queued. Showing "Disconnected" for
+    # something that has not happened yet is how an operator ends up believing
+    # a user was kicked when they are still online.
+    detail = (
+        f"Disconnected {username}"
+        if immediate
+        else f"Disconnect queued for {username} on node {node_id}"
+    )
+    await audit.record(db, "disconnect", username, f"node={node_id}", actor=admin.username)
     await db.commit()
-    return {"detail": f"Disconnected {username}"}
+    return {"detail": detail}

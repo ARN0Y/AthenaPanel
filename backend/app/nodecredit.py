@@ -13,12 +13,21 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import accounting, credit, outbound, pppd
+from . import accounting, credit, nodesessions, outbound, pppd
 from .config import settings
 from .database import AsyncSessionLocal
 from .models import Node, User
 
 log = logging.getLogger("vpn-panel.nodecredit")
+
+
+def _duration(started: datetime | None) -> int:
+    """Seconds a session lasted. Zero when its start was never recorded."""
+    if started is None:
+        return 0
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return max(0, int((datetime.now(timezone.utc) - started).total_seconds()))
 
 
 def _effective_rate_bps(user: User, session_rx: int, session_tx: int, elapsed: float) -> int:
@@ -86,15 +95,20 @@ async def handle_credit_request(
             )
 
         if reason == "SESSION_ENDED":
+            # The mirrored row is where this session's start time and address
+            # pool live; the agent reports neither. Closing it here rather than
+            # waiting for the interface to fall out of a report is what makes
+            # the ledger row carry a real duration instead of a zero.
+            row = await nodesessions.close_session(db, node_id, ifname)
             await accounting.record_session(
                 db,
                 username=username,
-                proto=pppd.classify_proto("", ""),
+                proto=pppd.classify_proto(row.peer_ip if row else "", row.proto if row else ""),
                 ifname=ifname or "",
-                started_at=None,
+                started_at=row.started_at if row else None,
                 bytes_in=int(session_rx * settings.usage_multiplier),
                 bytes_out=int(session_tx * settings.usage_multiplier),
-                duration=0,
+                duration=_duration(row.started_at if row else None),
                 node_id=node_id,
             )
             await db.commit()
@@ -181,6 +195,34 @@ async def build_sync(node_id: int, sync_id: int):
         for u in users
     ]
     return nodehub_pb2.UserSync(sync_id=sync_id, users=entries, full=True)
+
+
+async def take_pending_disconnects(node_id: int) -> list[tuple[str, str]]:
+    """Claim every queued disconnect for a node. Returns (username, reason).
+
+    Claimed, not read: the flag is cleared in the same transaction, so two
+    reports racing cannot each send the same kick. The cost of that choice is
+    that a stream dying between the clear and the send loses the request — which
+    is why this is only ever the operator's "kick them now" button and never the
+    path that enforces quota or expiry. Those run on the node itself, in the
+    credit loop, and do not depend on the master being reachable at all.
+    """
+    async with AsyncSessionLocal() as db:
+        users = (
+            await db.execute(
+                select(User).where(
+                    User.node_id == node_id,
+                    User.disconnect_requested_at.isnot(None),
+                )
+            )
+        ).scalars().all()
+        claimed = [(u.username, _refusal_reason(u) or "disconnected by an operator")
+                   for u in users]
+        for u in users:
+            u.disconnect_requested_at = None
+        if claimed:
+            await db.commit()
+        return claimed
 
 
 async def touch_sync_needed(node_id: int) -> None:

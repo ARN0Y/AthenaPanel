@@ -109,6 +109,14 @@ class User(Base):
     node_id: Mapped[int] = mapped_column(
         Integer, default=LOCAL_NODE_ID, index=True, nullable=False
     )
+    # An admin asked to kick this account off its node. The panel cannot signal
+    # a remote node directly — the hub is a separate process — so this column is
+    # the queue: the panel sets it, the hub sends the Disconnect on the node's
+    # next report and clears it. NULL means nothing is pending. Local users
+    # never use it; the panel kills their pppd itself, in-process.
+    disconnect_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Which admin owns/created this user (NULL = legacy/superadmin-owned)
     created_by_admin_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)

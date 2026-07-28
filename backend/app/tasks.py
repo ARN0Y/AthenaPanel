@@ -327,6 +327,110 @@ def _wg_rate(key: str, rx: int, tx: int) -> tuple[int, int]:
     return max(0, int((rx - prx) * 8 / dt)), max(0, int((tx - ptx) * 8 / dt))
 
 
+# (node_id, ifname) -> (monotonic_at, rx, tx, rx_bps, tx_bps)
+_remote_rate_cache: dict[tuple[int, str], tuple[float, int, int, int, int]] = {}
+
+# A remote sample this old is not a rate any more. Comfortably above the agent's
+# 15s report interval so an ordinary late report does not blank the column.
+REMOTE_RATE_MAX_AGE = 45.0
+
+
+def _remote_rate(key: tuple[int, str], rx: int, tx: int) -> tuple[int, int]:
+    """Throughput for a session whose counters only arrive every ~15s.
+
+    The snapshot refreshes faster than reports come in, so most calls see the
+    SAME counters as the previous one. Returning zero for those would make every
+    remote session's rate flicker between its real value and nothing, which
+    reads as an unstable link rather than what it is — a slower sample rate. The
+    last computed rate is held until a genuinely new sample arrives, and expires
+    if one stops arriving at all.
+    """
+    now = time.monotonic()
+    prev = _remote_rate_cache.get(key)
+    if prev is None:
+        _remote_rate_cache[key] = (now, rx, tx, 0, 0)
+        return 0, 0
+    at, prx, ptx, rx_bps, tx_bps = prev
+    if rx == prx and tx == ptx:
+        if now - at > REMOTE_RATE_MAX_AGE:
+            _remote_rate_cache[key] = (at, rx, tx, 0, 0)
+            return 0, 0
+        return rx_bps, tx_bps
+    dt = now - at
+    if dt <= 0 or rx < prx or tx < ptx:
+        # Counter restarted (the interface was reused): no rate can be derived
+        # across the discontinuity, so start a fresh baseline instead of
+        # reporting the whole counter as one interval's traffic.
+        _remote_rate_cache[key] = (now, rx, tx, 0, 0)
+        return 0, 0
+    rx_bps = max(0, int((rx - prx) * 8 / dt))
+    tx_bps = max(0, int((tx - ptx) * 8 / dt))
+    _remote_rate_cache[key] = (now, rx, tx, rx_bps, tx_bps)
+    return rx_bps, tx_bps
+
+
+async def _remote_sessions(db, now: datetime) -> list:
+    """Live sessions on other nodes, read from the rows the hub mirrors.
+
+    Only nodes that are currently reporting contribute. A silent node's rows are
+    deliberately kept in the table (they are held, not closed — see
+    nodesessions), but showing them as live would claim a session is up when
+    nobody can currently say so. They reappear, unchanged, when the node does.
+    """
+    from .schemas import SessionOut
+
+    remote_nodes = {
+        n.id: n
+        for n in (
+            await db.execute(select(Node).where(Node.is_local.is_(False)))
+        ).scalars().all()
+    }
+    if not remote_nodes:
+        _remote_rate_cache.clear()
+        return []
+
+    fresh: set[int] = set()
+    for nid, node in remote_nodes.items():
+        seen = _aware(node.last_seen_at)
+        if seen is not None and (now - seen).total_seconds() < nodes.STALE_AFTER_SECONDS:
+            fresh.add(nid)
+
+    rows = (
+        await db.execute(select(SessionRow).where(SessionRow.node_id != LOCAL_NODE_ID))
+    ).scalars().all()
+
+    out: list[SessionOut] = []
+    live_keys: set[tuple[int, str]] = set()
+    for row in rows:
+        if row.node_id not in fresh:
+            continue
+        key = (row.node_id, row.ifname)
+        live_keys.add(key)
+        rx_bps, tx_bps = _remote_rate(key, row.last_rx, row.last_tx)
+        # Same measurement as a local session: the counter since the billing
+        # base, multiplier applied. A row cannot display more than the credit
+        # loop has billed for it.
+        in_b, out_b = pppd.session_usage(row.last_rx, row.last_tx, row.base_rx, row.base_tx)
+        out.append(SessionOut(
+            username=row.username,
+            ifname=row.ifname,
+            ip=row.peer_ip,
+            node_id=row.node_id,
+            node_name=remote_nodes[row.node_id].name,
+            protocol=pppd.classify_proto(row.peer_ip, row.proto),
+            uptime_seconds=_duration(row.started_at, now),
+            rx_bytes=in_b,
+            tx_bytes=out_b,
+            rx_rate_bps=rx_bps,
+            tx_rate_bps=tx_bps,
+            state="active",
+        ))
+    for key in list(_remote_rate_cache.keys()):
+        if key not in live_keys:
+            _remote_rate_cache.pop(key, None)
+    return out
+
+
 async def _snapshot_once() -> None:
     """Refresh the shared live snapshot. This is the SINGLE place that reads
     per-interface sysfs / `wg show` for display, so API requests never do."""
@@ -375,6 +479,15 @@ async def _snapshot_once() -> None:
             for k in list(_wg_rate_cache.keys()):
                 if k not in live_keys:
                     _wg_rate_cache.pop(k, None)
+
+        # Name the local sessions after the local node so the Sessions page can
+        # label every row from one field, instead of treating a blank as "here".
+        local_node = await db.get(Node, LOCAL_NODE_ID)
+        local_name = local_node.name if local_node is not None else "local"
+        for s in sessions:
+            s.node_name = local_name
+        sessions.extend(await _remote_sessions(db, datetime.now(timezone.utc)))
+
     rx = sum(s.rx_rate_bps for s in sessions)
     tx = sum(s.tx_rate_bps for s in sessions)
     livecache.update(sessions, rx, tx)

@@ -27,7 +27,9 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from . import credit as credit_mod, nodecredit, nodes as nodes_mod
+from . import (
+    credit as credit_mod, nodecredit, nodes as nodes_mod, nodesessions,
+)
 from .config import settings
 from .database import AsyncSessionLocal
 from .models import Node
@@ -134,12 +136,14 @@ async def _record_hello(node_id: int, hello) -> None:
 
 
 async def _record_report(node_id: int, report) -> None:
-    """Refresh the heartbeat and stash the payload. Nothing else — see module doc.
+    """Refresh the heartbeat, stash the payload, and mirror the node's sessions.
 
-    The heartbeat is the one thing that matters right now: it is what
-    nodes.authoritative_ids() reads to decide whether this node may close its
-    own sessions. Writing it here, and only on a well-formed report, is what
-    makes "silent node" a fact rather than a guess.
+    The heartbeat is what nodes.authoritative_ids() reads to decide whether this
+    node may close its own sessions. Writing it here, and only on a well-formed
+    report, is what makes "silent node" a fact rather than a guess.
+
+    Sessions are mirrored for DISPLAY only — see nodesessions for why billing
+    stays entirely on the credit path.
     """
     now = datetime.now(timezone.utc)
     LAST_REPORT[node_id] = payload = {
@@ -210,6 +214,11 @@ async def _record_report(node_id: int, report) -> None:
         nodes_mod.accumulate_traffic(node, counters, previous, now)
         node.last_seen_at = now
         node.last_report = json.dumps(payload, separators=(",", ":"))
+        # Deliberately after last_seen_at: if the session mirror ever raises,
+        # the commit below is lost and the node looks silent for one interval,
+        # which is the safe direction — a held session is a delayed ledger row,
+        # while a wrongly-closed one is a wrong invoice.
+        await nodesessions.apply_report(db, node_id, payload["ppp"], now)
         await db.commit()
         return node.reconnect_requested_at, node.sync_requested_at
 
@@ -331,6 +340,16 @@ def build_servicer():
 
                     if kind == "report":
                         requested, sync_requested = await _record_report(node.id, msg.report)
+                        # Operator-initiated kicks queued by the panel process.
+                        # Drained here because a report is the one moment we
+                        # know the stream is alive in both directions.
+                        for username, why in await nodecredit.take_pending_disconnects(node.id):
+                            log.info("node %d: disconnecting %s (%s)", node.id, username, why)
+                            yield nodehub_pb2.HubMessage(
+                                disconnect=nodehub_pb2.Disconnect(
+                                    username=username, reason=why
+                                )
+                            )
                         # An operator asked this node to reconnect. Dropping the
                         # stream is enough: the agent's own backoff brings it
                         # straight back, and it re-derives everything from the

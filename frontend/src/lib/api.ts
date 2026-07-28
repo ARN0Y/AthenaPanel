@@ -141,6 +141,10 @@ export interface Session {
   username: string;
   ifname: string;
   ip: string;
+  // Which server is terminating this session. Every node has its own ppp0, so
+  // this is also what makes a session uniquely identifiable.
+  node_id: number;
+  node_name: string;
   protocol: string;
   calling_station: string;
   uptime_seconds: number;

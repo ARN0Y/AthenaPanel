@@ -31,7 +31,7 @@ import { api, ApiError, type Session } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { formatBps, formatBytes, formatDuration } from "@/lib/format";
 
-type SortKey = "user" | "protocol" | "uptime" | "down" | "up" | "total";
+type SortKey = "user" | "node" | "protocol" | "uptime" | "down" | "up" | "total";
 
 const numericKeys: SortKey[] = ["uptime", "down", "up", "total"];
 
@@ -39,6 +39,8 @@ function value(s: Session, key: SortKey): string | number {
   switch (key) {
     case "user":
       return (s.username || "").toLowerCase();
+    case "node":
+      return (s.node_name || "").toLowerCase();
     case "protocol":
       return (s.protocol || "").toLowerCase();
     case "uptime":
@@ -59,7 +61,7 @@ export function Sessions() {
     queryFn: api.listSessions,
     refetchInterval: 3000,
   });
-  const [target, setTarget] = React.useState<string | null>(null);
+  const [target, setTarget] = React.useState<Session | null>(null);
   const [query, setQuery] = React.useState("");
   const [sort, setSort] = React.useState<{ key: SortKey; dir: "asc" | "desc" }>({
     key: "down",
@@ -92,15 +94,30 @@ export function Sessions() {
         : { key, dir: numericKeys.includes(key) ? "desc" : "asc" },
     );
 
-  // Match on everything visible in a row so "l2tp", "192.168.42", "ppp7" and a
-  // username all work without the operator having to think about which field.
+  // The node column only exists once there is something to distinguish. On a
+  // single-server install every row would say the same word, which is noise
+  // dressed up as information.
+  const nodes = React.useMemo(() => {
+    const seen = new Map<number, string>();
+    for (const s of sessions) seen.set(s.node_id, s.node_name || `node ${s.node_id}`);
+    return [...seen.entries()]
+      .map(([id, name]) => ({ id, name, n: sessions.filter((s) => s.node_id === id).length }))
+      .sort((a, b) => a.id - b.id);
+  }, [sessions]);
+  const multiNode = nodes.length > 1;
+
+  // Match on everything visible in a row so "l2tp", "192.168.42", "ppp7", a
+  // node name and a username all work without the operator having to think
+  // about which field.
   const filtered = React.useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return sessions;
     return sessions.filter((s) =>
-      [s.username, s.protocol, s.ip, s.ifname].some((f) => (f || "").toLowerCase().includes(q)),
+      [s.username, s.protocol, s.ip, s.ifname, multiNode ? s.node_name : ""].some((f) =>
+        (f || "").toLowerCase().includes(q),
+      ),
     );
-  }, [sessions, query]);
+  }, [sessions, query, multiNode]);
 
   const sorted = React.useMemo(() => {
     const arr = [...filtered];
@@ -192,7 +209,7 @@ export function Sessions() {
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-success/15 text-success">
               <OnlineDot online />
             </div>
-            <div>
+            <div className="min-w-0">
               <div className="text-2xl font-bold">{sessions.length}</div>
               <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-muted-foreground">
                 <span>online</span>
@@ -202,6 +219,21 @@ export function Sessions() {
                   </span>
                 ))}
               </div>
+              {multiNode && (
+                <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-muted-foreground/80">
+                  {nodes.map((n) => (
+                    <button
+                      key={n.id}
+                      type="button"
+                      onClick={() => setQuery(query === n.name ? "" : n.name)}
+                      className="rounded px-1 py-0.5 tabular-nums transition-colors hover:bg-muted hover:text-foreground"
+                      title={`Filter to ${n.name}`}
+                    >
+                      {n.name} <span className="font-medium">{n.n}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -261,6 +293,7 @@ export function Sessions() {
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
                   <SortHead label="User" k="user" />
+                  {multiNode && <SortHead label="Node" k="node" />}
                   <SortHead label="Protocol" k="protocol" />
                   <TableHead>IP</TableHead>
                   <SortHead label="Connected" k="uptime" />
@@ -273,14 +306,14 @@ export function Sessions() {
               <TableBody>
                 {isLoading && (
                   <TableRow>
-                    <TableCell colSpan={8} className="py-10 text-center text-muted-foreground">
+                    <TableCell colSpan={multiNode ? 9 : 8} className="py-10 text-center text-muted-foreground">
                       Loading…
                     </TableCell>
                   </TableRow>
                 )}
                 {!isLoading && sorted.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={8} className="py-10 text-center text-muted-foreground">
+                    <TableCell colSpan={multiNode ? 9 : 8} className="py-10 text-center text-muted-foreground">
                       {query ? (
                         <>
                           No session matches “{query}”.{" "}
@@ -299,7 +332,9 @@ export function Sessions() {
                   </TableRow>
                 )}
                 {sorted.map((s) => (
-                  <TableRow key={s.ifname} className="group">
+                  // Keyed by node too: every node has a ppp0, so the interface
+                  // name alone is not unique once a second node exists.
+                  <TableRow key={`${s.node_id}:${s.ifname}`} className="group">
                     <TableCell>
                       <div className="flex items-center gap-2 font-medium">
                         <OnlineDot online />
@@ -307,6 +342,11 @@ export function Sessions() {
                       </div>
                       <div className="pl-4 font-mono text-[10px] text-muted-foreground/70">{s.ifname}</div>
                     </TableCell>
+                    {multiNode && (
+                      <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                        {s.node_name || `node ${s.node_id}`}
+                      </TableCell>
+                    )}
                     <TableCell>
                       <ProtocolBadge protocol={s.protocol} />
                     </TableCell>
@@ -327,7 +367,7 @@ export function Sessions() {
                         size="icon"
                         className="h-8 w-8 opacity-60 transition-opacity group-hover:opacity-100"
                         title="Disconnect"
-                        onClick={() => setTarget(s.username)}
+                        onClick={() => setTarget(s)}
                       >
                         <PowerOff className="h-4 w-4 text-destructive" />
                       </Button>
@@ -343,11 +383,18 @@ export function Sessions() {
       <ConfirmDialog
         open={!!target}
         onOpenChange={(o) => !o && setTarget(null)}
-        title={`Disconnect ${target}?`}
-        description="The client is dropped immediately and may reconnect."
+        title={target ? `Disconnect ${target.username}?` : "Disconnect?"}
+        // The panel kills a local session itself; a session on another node
+        // goes through that node's agent, so it lands on its next check-in.
+        // Saying "immediately" for both would be a promise the panel cannot keep.
+        description={
+          target && target.node_id !== 1
+            ? `The request is sent to ${target.node_name || `node ${target.node_id}`} and takes effect within a few seconds.`
+            : "The client is dropped immediately and may reconnect."
+        }
         confirmLabel="Disconnect"
         onConfirm={() => {
-          if (target) disconnectMut.mutate(target);
+          if (target) disconnectMut.mutate(target.username);
           setTarget(null);
         }}
       />

@@ -82,24 +82,39 @@ async def rewrite(db: AsyncSession, node_id: int = LOCAL_NODE_ID) -> None:
     # never break the local write that already succeeded — a node that misses a
     # nudge still resyncs when it reconnects.
     try:
-        await _nudge_remote_nodes(db)
+        await _nudge_remote_nodes()
     except Exception:  # noqa: BLE001
         log.exception("could not flag remote nodes for resync")
 
 
-async def _nudge_remote_nodes(db: AsyncSession) -> None:
+async def _nudge_remote_nodes() -> None:
+    """Flag every remote node as needing a fresh account list.
+
+    Runs in its OWN session rather than the caller's. It has to commit, and
+    committing someone else's session commits whatever else they had pending —
+    every caller happens to commit first today, but that is a property of the
+    callers, not something this function can rely on.
+
+    `enabled` is deliberately not consulted, for the same reason
+    nodes.authoritative_ids ignores it: a disabled node is one that takes no NEW
+    users, not one that stopped serving the ones it has. Skipping it would leave
+    a node draining its sessions with a stale account list, still authenticating
+    people who were deleted.
+    """
     from datetime import datetime, timezone
 
+    from .database import AsyncSessionLocal
     from .models import Node
 
     now = datetime.now(timezone.utc)
-    rows = (
-        await db.execute(select(Node).where(Node.is_local.is_(False), Node.enabled.is_(True)))
-    ).scalars().all()
-    for node in rows:
-        node.sync_requested_at = now
-    if rows:
-        await db.commit()
+    async with AsyncSessionLocal() as own:
+        rows = (
+            await own.execute(select(Node).where(Node.is_local.is_(False)))
+        ).scalars().all()
+        for node in rows:
+            node.sync_requested_at = now
+        if rows:
+            await own.commit()
 
 
 def _atomic_write(directory: str, path: str, content: str) -> None:

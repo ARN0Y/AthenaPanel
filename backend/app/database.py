@@ -56,6 +56,7 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("outbound", "VARCHAR(16) NOT NULL DEFAULT 'direct'"),
         ("l2tp_mode", "VARCHAR(8) NOT NULL DEFAULT 'ipsec'"),
         ("node_id", "INTEGER NOT NULL DEFAULT 1"),
+        ("disconnect_requested_at", "DATETIME"),
     ],
     # Self-healing accounting (v2): per-session billing baseline + proto + a
     # debounce counter so a transient sysfs miss never drops a live session.
@@ -145,6 +146,8 @@ _PG_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("nodes", "ext_wg_endpoint", "VARCHAR(255) NOT NULL DEFAULT ''"),
     # Every pre-existing account stays on node 1, which is where it already is.
     ("users", "node_id", "INTEGER NOT NULL DEFAULT 1"),
+    # Pending "kick this account off its node" request; see models.User.
+    ("users", "disconnect_requested_at", "TIMESTAMPTZ"),
 ]
 
 

@@ -14,6 +14,8 @@ readers always see a consistent snapshot.
 
 import time
 
+from .models import LOCAL_NODE_ID
+
 _snap: dict = {
     "ts": 0.0,              # monotonic time of last refresh (0 = never)
     "sessions": [],         # list[SessionOut], ALL sessions (unscoped, incl WG)
@@ -37,6 +39,13 @@ def update(sessions: list, rx_rate_bps: int, tx_rate_bps: int) -> None:
         # overlay is where they live until then. WG still appears in `sessions`
         # and `online` below (Sessions page + online badge), just not in billing.
         if s.protocol == "WireGuard":
+            continue
+        # A remote node's sessions are excluded for exactly the same reason:
+        # the credit loop commits their bytes to used_bytes as they are spent
+        # (nodecredit.handle_credit_request), so adding them to the overlay
+        # would show — and enforce — every remote user's traffic twice. Only
+        # node 1 defers its bytes to finalize, so only node 1 needs an overlay.
+        if s.node_id != LOCAL_NODE_ID:
             continue
         b = s.rx_bytes + s.tx_bytes
         live[s.username] = live.get(s.username, 0) + b

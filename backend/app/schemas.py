@@ -171,6 +171,12 @@ class SessionOut(BaseModel):
     username: str
     ifname: str
     ip: str
+    # Which server is actually terminating this session. Carried on every
+    # session, not only remote ones, so nothing downstream has to guess what a
+    # missing value means — and so the live overlay can tell node 1's sessions
+    # (billed at finalize) from a node's (billed continuously by the credit path).
+    node_id: int = 1
+    node_name: str = ""
     protocol: str = "L2TP"   # "L2TP" or "SSTP" (derived from the client IP pool)
     calling_station: str = ""
     uptime_seconds: int = 0

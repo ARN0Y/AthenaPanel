@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import LOCAL_NODE_ID, Node
+from .models import LOCAL_NODE_ID, Node, User
 
 log = logging.getLogger("vpn-panel.nodes")
 
@@ -147,6 +147,29 @@ def accumulate_traffic(
     elif elapsed >= 120:
         node.rx_rate_bps = node.tx_rate_bps = 0
     node.rate_at = now
+
+
+async def terminate_user(db: AsyncSession, user: User) -> bool:
+    """Drop a user's sessions wherever they are. Caller commits.
+
+    The single place that knows a disconnect is not one action but two: on node
+    1 the panel signals pppd itself, and on any other node it can only leave a
+    request for the hub to deliver. Every caller that used to reach straight for
+    pppd.terminate_user goes through here, because on a multi-node install that
+    call silently did nothing for most of the users it was given — a disabled
+    account would stay connected until its credit ran out.
+
+    Returns True when the user was dropped immediately, False when a request was
+    queued instead (delivered on that node's next report, within ~15s).
+    """
+    from . import pppd  # local: pppd pulls in schemas, which imports this module
+
+    if (user.node_id or LOCAL_NODE_ID) == LOCAL_NODE_ID:
+        await pppd.terminate_user(db, user.username)
+        return True
+    user.disconnect_requested_at = datetime.now(timezone.utc)
+    log.info("queued a disconnect for %s on node %d", user.username, user.node_id)
+    return False
 
 
 def new_token() -> str:

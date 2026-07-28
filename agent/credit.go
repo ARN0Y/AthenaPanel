@@ -136,6 +136,37 @@ func (e *creditEngine) applySync(s *pb.UserSync) (int, error) {
 	}
 	enforce.ReloadAccel()
 	log.Printf("applied sync %d: %d of %d accounts enabled", s.SyncId, n, len(s.Users))
+
+	// chap-secrets only decides who may AUTHENTICATE. A user who was deleted,
+	// disabled, or moved to another node is already connected, and rewriting the
+	// file does nothing to them — they stay online until their credit happens to
+	// run out, which for a deleted account is never asked about again. The sync
+	// is the full list by contract, so anyone holding a session who is not in it
+	// (or is in it as disabled) must go now.
+	//
+	// Only sessions this agent knows about are touched: a name that is not in
+	// the ledger has nothing to drop, so an empty list is not an instruction to
+	// disconnect the whole node.
+	if s.Full {
+		allowed := make(map[string]bool, len(s.Users))
+		for _, u := range s.Users {
+			allowed[u.Username] = u.Enabled
+		}
+		for _, name := range e.led.Users() {
+			if enabled, listed := allowed[name]; listed && enabled {
+				continue
+			}
+			if e.led.SessionCount(name) == 0 {
+				continue
+			}
+			log.Printf("sync %d: %s is no longer served here, disconnecting", s.SyncId, name)
+			// Not Forget()ten: the ledger entry is what keeps billing this
+			// session if the kill does not take. It is cleaned up by the ip-down
+			// hook when the link actually drops, which is the only evidence that
+			// it did.
+			e.disconnectUser(name)
+		}
+	}
 	return n, nil
 }
 
@@ -239,13 +270,13 @@ func reasonOf(s string) pb.CreditRequest_Reason {
 // disconnectUser drops every session a user has on this node, on the hub's
 // instruction rather than because credit ran out.
 func (e *creditEngine) disconnectUser(username string) {
-	for _, v := range e.led.Evaluate(true) {
-		if v.Username != username {
-			continue
-		}
-		if _, err := enforce.Disconnect(v.Pids); err != nil {
+	if pids := e.led.Pids(username); len(pids) > 0 {
+		if _, err := enforce.Disconnect(pids); err != nil {
 			log.Printf("disconnect %s: %v", username, err)
 		}
 	}
+	// accel-ppp owns its SSTP sessions itself and exposes no pid, so it is
+	// always asked separately — including when the ledger knows of no session,
+	// because an SSTP session that predates this agent has none.
 	_ = enforce.DisconnectAccel(username)
 }

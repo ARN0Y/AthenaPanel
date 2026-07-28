@@ -328,6 +328,41 @@ func (l *Ledger) Forget(username string) {
 	delete(l.users, username)
 }
 
+// Pids lists the live pppd processes belonging to a user.
+//
+// Exists so that terminating someone does not have to go through Evaluate,
+// which is a decision function with side effects: it sets the in-flight and
+// exhausted markers as it goes. Calling it merely to read pids would silently
+// change what the next credit tick decides about every OTHER user in the
+// ledger, which is a very expensive way to ask a simple question.
+func (l *Ledger) Pids(username string) []int32 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	u, ok := l.users[username]
+	if !ok {
+		return nil
+	}
+	out := make([]int32, 0, len(u.sessions))
+	for _, s := range u.sessions {
+		if s.Pid > 0 {
+			out = append(out, s.Pid)
+		}
+	}
+	return out
+}
+
+// SessionCount is how many live interfaces a user holds. Zero for a name that
+// is tracked but not currently connected — and a session with no usable pid
+// (accel-ppp owns its own) still counts, because it is still a live session.
+func (l *Ledger) SessionCount(username string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if u, ok := l.users[username]; ok {
+		return len(u.sessions)
+	}
+	return 0
+}
+
 // Users lists everyone currently tracked.
 func (l *Ledger) Users() []string {
 	l.mu.Lock()
