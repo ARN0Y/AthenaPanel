@@ -150,28 +150,106 @@ function ForwardHint({ node }: { node: NodeInfo }) {
   );
 }
 
-function Metric({
-  label,
+/** One figure in the page-level summary strip. */
+function Summary({
   value,
-  sub,
+  label,
   className,
 }: {
-  label: string;
   value: React.ReactNode;
-  sub?: React.ReactNode;
+  label: string;
   className?: string;
 }) {
   return (
-    <div className="min-w-0">
-      <div className={cn("truncate text-sm font-semibold tabular-nums", className)}>{value}</div>
-      <div className="truncate text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div>
-      {sub && <div className="truncate text-[10px] text-muted-foreground/80">{sub}</div>}
+    <div className={cn("min-w-0", className)}>
+      <div className={cn("truncate text-2xl font-semibold leading-none tabular-nums")}>{value}</div>
+      <div className="mt-1 truncate text-[11px] text-muted-foreground">{label}</div>
     </div>
+  );
+}
+
+/* --------------------------------------------------------- live throughput */
+
+const HISTORY = 40; // ~3.5 min at the page's 5s refresh
+
+/** Rolling per-node throughput history, kept in the browser.
+ *
+ *  The API returns an instantaneous rate, which as a bare number tells you
+ *  almost nothing — 236 bps could be a dying node or an idle one. A short trace
+ *  answers "is this normal for this node right now", which is the question an
+ *  operator is actually asking, and it costs one number per poll to keep. */
+function useRateHistory(nodes: NodeInfo[]) {
+  const [history, setHistory] = React.useState<Record<number, { rx: number[]; tx: number[] }>>({});
+  const stamp = nodes.map((n) => `${n.id}:${n.rx_rate_bps}:${n.tx_rate_bps}`).join("|");
+
+  React.useEffect(() => {
+    if (!nodes.length) return;
+    setHistory((prev) => {
+      const next: Record<number, { rx: number[]; tx: number[] }> = {};
+      for (const n of nodes) {
+        const had = prev[n.id] ?? { rx: [], tx: [] };
+        next[n.id] = {
+          rx: [...had.rx, n.rx_rate_bps].slice(-HISTORY),
+          tx: [...had.tx, n.tx_rate_bps].slice(-HISTORY),
+        };
+      }
+      return next; // nodes that vanished drop out with their history
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stamp]);
+
+  return history;
+}
+
+/** A bare trace of recent throughput. Both series share one vertical scale so
+ *  the asymmetry between download and upload is readable at a glance, which is
+ *  the whole point of drawing them together. */
+function Sparkline({ rx, tx }: { rx: number[]; tx: number[] }) {
+  const W = 100;
+  const H = 28;
+  const peak = Math.max(1, ...rx, ...tx);
+  const path = (series: number[]) => {
+    if (series.length < 2) return "";
+    const step = W / (HISTORY - 1);
+    return series
+      .map((v, i) => {
+        const x = (i + (HISTORY - series.length)) * step;
+        const y = H - (v / peak) * (H - 2) - 1;
+        return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(" ");
+  };
+  const area = (series: number[]) => {
+    const d = path(series);
+    if (!d) return "";
+    const step = W / (HISTORY - 1);
+    const x0 = (HISTORY - series.length) * step;
+    return `${d} L${W},${H} L${x0.toFixed(1)},${H} Z`;
+  };
+
+  if (rx.length < 2) {
+    return <div className="h-7 w-full" aria-hidden />;
+  }
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      preserveAspectRatio="none"
+      className="h-7 w-full"
+      aria-hidden
+    >
+      <path d={area(tx)} fill="hsl(var(--chart-rx))" opacity="0.12" />
+      <path d={area(rx)} fill="hsl(var(--chart-tx))" opacity="0.12" />
+      <path d={path(tx)} fill="none" stroke="hsl(var(--chart-rx))" strokeWidth="1.25"
+            vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
+      <path d={path(rx)} fill="none" stroke="hsl(var(--chart-tx))" strokeWidth="1.25"
+            vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
+    </svg>
   );
 }
 
 function NodeCard({
   node,
+  rates,
   onEdit,
   onReconnect,
   onToggle,
@@ -179,6 +257,7 @@ function NodeCard({
   onDelete,
 }: {
   node: NodeInfo;
+  rates: { rx: number[]; tx: number[] };
   onEdit: () => void;
   onReconnect: () => void;
   onToggle: () => void;
@@ -187,7 +266,6 @@ function NodeCard({
 }) {
   const tone = !node.enabled ? "bg-muted-foreground" : node.online ? "bg-success" : "bg-destructive";
   const state = !node.enabled ? "Disabled" : node.online ? "Online" : "Not reporting";
-  const total = node.rx_total_bytes + node.tx_total_bytes;
 
   return (
     <Card className={cn("overflow-hidden transition-colors", !node.enabled && "opacity-70")}>
@@ -262,76 +340,75 @@ function NodeCard({
           </div>
         </div>
 
-        {/* live throughput */}
-        <div className="grid grid-cols-2 gap-px bg-border">
-          <div className="flex items-center gap-2 bg-card px-4 py-2.5">
-            <ArrowDownToLine className="h-3.5 w-3.5 shrink-0 text-[hsl(var(--chart-rx))]" />
-            <div className="min-w-0">
-              <div className="truncate font-mono text-sm font-semibold tabular-nums text-[hsl(var(--chart-rx))]">
-                {formatBps(node.tx_rate_bps)}
+        {/* live — one block, because throughput, load and the trace are all the
+            same question: what is this machine doing right now? */}
+        <div className="px-4 pb-3">
+          <div className="flex items-end justify-between gap-4">
+            <div className="flex items-baseline gap-5">
+              <div className="min-w-0">
+                <div className="flex items-baseline gap-1.5">
+                  <ArrowDownToLine className="h-3 w-3 shrink-0 translate-y-px text-[hsl(var(--chart-rx))]" />
+                  <span className="font-mono text-lg font-semibold leading-none tabular-nums text-[hsl(var(--chart-rx))]">
+                    {formatBps(node.tx_rate_bps)}
+                  </span>
+                </div>
               </div>
-              <div className="text-[10px] uppercase tracking-wide text-muted-foreground">download</div>
+              <div className="min-w-0">
+                <div className="flex items-baseline gap-1.5">
+                  <ArrowUpFromLine className="h-3 w-3 shrink-0 translate-y-px text-[hsl(var(--chart-tx))]" />
+                  <span className="font-mono text-lg font-semibold leading-none tabular-nums text-[hsl(var(--chart-tx))]">
+                    {formatBps(node.rx_rate_bps)}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-lg font-semibold leading-none tabular-nums">{node.sessions}</div>
+              <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                {node.sessions === 1 ? "session" : "sessions"}
+                {node.wg_count > 0 && node.ppp_count > 0 && (
+                  <span className="ml-1 normal-case opacity-70">
+                    {node.ppp_count}p · {node.wg_count}w
+                  </span>
+                )}
+              </div>
             </div>
           </div>
-          <div className="flex items-center gap-2 bg-card px-4 py-2.5">
-            <ArrowUpFromLine className="h-3.5 w-3.5 shrink-0 text-[hsl(var(--chart-tx))]" />
-            <div className="min-w-0">
-              <div className="truncate font-mono text-sm font-semibold tabular-nums text-[hsl(var(--chart-tx))]">
-                {formatBps(node.rx_rate_bps)}
-              </div>
-              <div className="text-[10px] uppercase tracking-wide text-muted-foreground">upload</div>
-            </div>
+          <div className="mt-1.5">
+            <Sparkline rx={rates.rx} tx={rates.tx} />
           </div>
         </div>
 
-        {/* counters */}
-        <div className="grid grid-cols-3 gap-3 border-t px-4 py-3">
-          {/* One number, one breakdown. They used to be two metrics reading two
-              different sources, which meant the card could show "4 sessions"
-              next to "0 tunnels" and look broken. */}
-          <Metric
-            label="sessions"
-            value={node.sessions}
-            sub={node.wg_count > 0 ? `${node.ppp_count} ppp · ${node.wg_count} wg` : undefined}
-          />
-          <Metric
-            label="transferred"
-            value={formatBytes(total)}
-            sub={`↓${formatBytes(node.tx_total_bytes)} · ↑${formatBytes(node.rx_total_bytes)}`}
-          />
-          <Metric
-            label={node.is_local ? "uptime" : node.online ? "uptime" : "last seen"}
-            value={
-              node.is_local
-                ? "—"
-                : node.online
-                  ? formatUptime(node.uptime_seconds)
-                  : node.last_seen_seconds === null
-                    ? "never"
-                    : formatDuration(node.last_seen_seconds)
-            }
-            sub={node.is_local ? "always on" : node.online ? `seen ${node.last_seen_seconds}s ago` : undefined}
-          />
-        </div>
-
-        {/* engines + host */}
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t bg-muted/30 px-4 py-2.5">
+        {/* capability + host */}
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t bg-muted/25 px-4 py-2">
           <div className="flex flex-wrap gap-1">
             <Engine label="L2TP" ok={node.xl2tpd_ok} port={node.l2tp_port} />
             <Engine label="IPsec" ok={node.ipsec_ok} />
             <Engine label="SSTP" ok={node.accel_ppp_ok} port={node.sstp_port} />
             <Engine label="WG" ok={node.wireguard_ok} port={node.wg_port} />
           </div>
-          {node.mem_total_bytes > 0 && (
-            <span className="font-mono text-[10px] text-muted-foreground">
-              load {node.load1.toFixed(2)} ·{" "}
-              {formatBytes(node.mem_total_bytes - node.mem_available_bytes)}/{formatBytes(node.mem_total_bytes)}
+          <div className="flex items-center gap-3 font-mono text-[10px] text-muted-foreground">
+            {node.mem_total_bytes > 0 && (
+              <span title="1-minute load average · memory in use">
+                {node.load1.toFixed(2)} ·{" "}
+                {formatBytes(node.mem_total_bytes - node.mem_available_bytes)}/
+                {formatBytes(node.mem_total_bytes)}
+              </span>
+            )}
+            <span className={cn(!node.is_local && !node.online && "text-destructive")}>
+              {node.is_local
+                ? "always on"
+                : node.online
+                  ? `up ${formatUptime(node.uptime_seconds)}`
+                  : node.last_seen_seconds === null
+                    ? "never seen"
+                    : `silent ${formatDuration(node.last_seen_seconds)}`}
             </span>
-          )}
+          </div>
         </div>
 
-        <div className="border-t px-4 py-2.5">
-          <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+        <div className="px-4 py-2.5">
+          <div className="mb-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">
             external proxy — what customers dial
           </div>
           <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 font-mono text-[11px]">
@@ -344,7 +421,7 @@ function NodeCard({
         </div>
 
         {node.note && (
-          <p className="border-t px-4 py-2 text-[11px] text-muted-foreground">{node.note}</p>
+          <p className="border-t px-4 py-2 text-[11px] italic text-muted-foreground">{node.note}</p>
         )}
       </CardContent>
     </Card>
@@ -762,10 +839,14 @@ export function Nodes() {
     );
   }, [nodes, query]);
 
+  const history = useRateHistory(nodes);
   const online = nodes.filter((n) => n.online && n.enabled).length;
   const totalRx = nodes.reduce((a, n) => a + n.rx_rate_bps, 0);
   const totalTx = nodes.reduce((a, n) => a + n.tx_rate_bps, 0);
-  const totalBytes = nodes.reduce((a, n) => a + n.rx_total_bytes + n.tx_total_bytes, 0);
+  const totalSessions = nodes.reduce((a, n) => a + n.sessions, 0);
+  // Any node that is registered and expected to work but is not reporting.
+  // A disabled node is not a problem; a silent enabled one is.
+  const silent = nodes.filter((n) => n.enabled && !n.online);
   // The address agents are told to dial. Shown in the install steps; the panel
   // does not know its own public address, so this is a best-effort default the
   // operator can correct.
@@ -788,35 +869,44 @@ export function Nodes() {
         }
       />
 
-      <div className="mb-4 grid gap-3 sm:grid-cols-4">
-        <Card>
-          <CardContent className="p-3">
-            <div className="text-xl font-bold tabular-nums">
-              {online}
-              <span className="text-sm font-normal text-muted-foreground">/{nodes.length}</span>
-            </div>
-            <div className="text-[11px] text-muted-foreground">nodes online</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="p-3">
-            <div className="text-xl font-bold tabular-nums text-[hsl(var(--chart-rx))]">{formatBps(totalTx)}</div>
-            <div className="text-[11px] text-muted-foreground">download, all nodes</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="p-3">
-            <div className="text-xl font-bold tabular-nums text-[hsl(var(--chart-tx))]">{formatBps(totalRx)}</div>
-            <div className="text-[11px] text-muted-foreground">upload, all nodes</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="p-3">
-            <div className="text-xl font-bold tabular-nums">{formatBytes(totalBytes)}</div>
-            <div className="text-[11px] text-muted-foreground">transferred, all nodes</div>
-          </CardContent>
-        </Card>
-      </div>
+      {silent.length > 0 && (
+        <div className="mb-4 flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs">
+          <Dot tone="bg-destructive" pulse />
+          <span className="text-destructive">
+            {silent.length === 1
+              ? `${silent[0].name} is enabled but not reporting`
+              : `${silent.length} enabled nodes are not reporting`}
+          </span>
+          <span className="text-muted-foreground">
+            — their sessions are held, not closed, and nothing is billed twice.
+          </span>
+        </div>
+      )}
+
+      <Card className="mb-4">
+        <CardContent className="grid grid-cols-2 gap-x-4 gap-y-3 p-4 sm:grid-cols-4 sm:divide-x sm:divide-border">
+          <Summary
+            value={
+              <>
+                {online}
+                <span className="text-base font-normal text-muted-foreground">/{nodes.length}</span>
+              </>
+            }
+            label="nodes online"
+          />
+          <Summary value={totalSessions} label="sessions, all nodes" className="sm:pl-4" />
+          <Summary
+            value={formatBps(totalTx)}
+            label="download"
+            className="text-[hsl(var(--chart-rx))] sm:pl-4"
+          />
+          <Summary
+            value={formatBps(totalRx)}
+            label="upload"
+            className="text-[hsl(var(--chart-tx))] sm:pl-4"
+          />
+        </CardContent>
+      </Card>
 
       <div className="relative mb-4 max-w-md">
         <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -854,6 +944,7 @@ export function Nodes() {
           <NodeCard
             key={n.id}
             node={n}
+            rates={history[n.id] ?? { rx: [], tx: [] }}
             onEdit={() => setEditing(n)}
             onReconnect={() => reconnectMut.mutate(n.id)}
             onToggle={() => updateMut.mutate({ id: n.id, p: { enabled: !n.enabled } })}

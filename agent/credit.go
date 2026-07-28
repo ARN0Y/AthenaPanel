@@ -26,6 +26,11 @@ type creditEngine struct {
 	chapSrv  string
 	wgIface  string
 
+	// Closed-over signal asking the report loop to send NOW rather than at the
+	// next tick. Buffered depth 1: a hundred sessions coming up at once should
+	// produce one extra report, not a hundred.
+	kick chan struct{}
+
 	mu     sync.Mutex
 	send   func(*pb.AgentMessage) error // nil while disconnected
 	pollMs int
@@ -43,6 +48,24 @@ func newCreditEngine(chapPath, chapServerField, wgIface string) *creditEngine {
 		wgIface:  wgIface,
 		pollMs:   1000,
 		wgOwners: map[string]string{},
+		kick:     make(chan struct{}, 1),
+	}
+}
+
+// reportNow asks for an out-of-band report.
+//
+// The periodic report is telemetry and 15s is the right cadence for it: node
+// load, throughput and host stats do not change meaningfully faster, and a
+// node with 130 sessions sends ~13 KB each time. But a session STARTING is not
+// telemetry, it is an event, and the node knows the exact instant it happened
+// because the ip-up hook just told it. Waiting up to a full interval to
+// mention it would make the panel look slow for no reason other than the
+// schedule. Pushing on the event costs nothing when nothing is happening,
+// which is why this is better than simply reporting more often.
+func (e *creditEngine) reportNow() {
+	select {
+	case e.kick <- struct{}{}:
+	default: // one already pending; that report will carry this change too
 	}
 }
 
@@ -96,6 +119,8 @@ func (e *creditEngine) OnUp(ev hooks.Event) (bool, string) {
 	rx, tx := collect.IfaceBytes(ev.Ifname)
 	e.led.AddSession(ev.Username, ev.Ifname, ev.Pid, rx, tx)
 	log.Printf("session up: %s on %s (pid %d)", ev.Username, ev.Ifname, ev.Pid)
+	// The panel should show this customer now, not at the next tick.
+	e.reportNow()
 
 	// Fail OPEN. The alternative is refusing a paying customer because a
 	// control-plane message was slow, which is a worse failure than serving one
@@ -111,6 +136,9 @@ func (e *creditEngine) OnDown(ev hooks.Event) {
 	e.led.CloseSession(ev.Username, ev.Ifname, ev.InOctets, ev.OutOctets)
 	log.Printf("session down: %s on %s (%d/%d bytes reported)",
 		ev.Username, ev.Ifname, ev.InOctets, ev.OutOctets)
+	// Same on the way out: a session that ended should stop being displayed as
+	// live immediately, not linger for an interval.
+	e.reportNow()
 
 	// Report immediately rather than at the next tick: this is the last chance
 	// to bill the session, and the hub needs it before it decides anything else

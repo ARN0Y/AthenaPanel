@@ -297,6 +297,14 @@ func runSession(ctx context.Context, cfg config, engine *creditEngine) error {
 			if err := sendReport(send, cfg, engine); err != nil {
 				return err
 			}
+		case <-engine.kick:
+			// A session just started or ended. Report immediately and restart
+			// the timer, so an event does not also cost an early periodic
+			// report a moment later.
+			if err := sendReport(send, cfg, engine); err != nil {
+				return err
+			}
+			ticker.Reset(interval)
 		}
 	}
 }
