@@ -47,15 +47,18 @@ func WgManaged(iface string) bool {
 
 // SyncWgPeers makes the node's WireGuard interface hold exactly the given set.
 //
-// ReplacePeers, not add-then-remove: the hub always sends the complete list, so
-// replacing it outright is the only way a peer that was deleted while this node
-// was offline actually goes away. Anything else leaves a revoked key working
-// until someone notices.
+// A DIFF, deliberately, not ReplacePeers. The end state is identical either
+// way, but replacing the list tears down and recreates every peer — the live
+// session, its handshake and its counters all go — so a customer who was
+// browsing gets a stall until their client rekeys. Since a sync is sent for ANY
+// account change on the node, that would mean every WireGuard user on a node
+// hiccups whenever anyone else's account is edited. Peers that have not changed
+// are left strictly alone.
 //
-// Removing a peer takes effect immediately — WireGuard has no session to tear
-// down, so the next packet from that key is simply not decrypted. That is why
-// this is both the provisioning path and the enforcement path — and also why it
-// refuses to touch an unmarked interface.
+// Revocation is still exact: a key absent from the hub's list is removed, and
+// removal takes effect on the next packet because WireGuard has no session to
+// tear down. That is why this is both the provisioning and the enforcement path
+// — and why it refuses to touch an unmarked interface at all.
 func SyncWgPeers(iface string, peers []WgPeer) (applied int, err error) {
 	if iface == "" {
 		return 0, nil
@@ -70,11 +73,18 @@ func SyncWgPeers(iface string, peers []WgPeer) (applied int, err error) {
 		return 0, fmt.Errorf("wgctrl: %w", err)
 	}
 	defer c.Close()
-	if _, err := c.Device(iface); err != nil {
+	dev, err := c.Device(iface)
+	if err != nil {
 		return 0, fmt.Errorf("no wireguard interface %q: %w", iface, err)
 	}
 
-	cfgs := make([]wgtypes.PeerConfig, 0, len(peers))
+	current := make(map[wgtypes.Key]wgtypes.Peer, len(dev.Peers))
+	for _, p := range dev.Peers {
+		current[p.PublicKey] = p
+	}
+
+	var cfgs []wgtypes.PeerConfig
+	wanted := make(map[wgtypes.Key]bool, len(peers))
 	for _, p := range peers {
 		key, err := wgtypes.ParseKey(p.PublicKey)
 		if err != nil {
@@ -84,6 +94,12 @@ func SyncWgPeers(iface string, peers []WgPeer) (applied int, err error) {
 		ipnet, err := allowedIP(p.Address)
 		if err != nil {
 			continue
+		}
+		wanted[key] = true
+		applied++
+
+		if have, ok := current[key]; ok && peerMatches(have, *ipnet, p.PresharedKey) {
+			continue // already exactly right — do not disturb a live session
 		}
 		pc := wgtypes.PeerConfig{
 			PublicKey:         key,
@@ -96,14 +112,18 @@ func SyncWgPeers(iface string, peers []WgPeer) (applied int, err error) {
 			}
 		}
 		cfgs = append(cfgs, pc)
-		applied++
 	}
 
-	if err := c.ConfigureDevice(iface, wgtypes.Config{
-		ReplacePeers: true,
-		Peers:        cfgs,
-	}); err != nil {
-		return 0, fmt.Errorf("configure %s: %w", iface, err)
+	for key := range current {
+		if !wanted[key] {
+			cfgs = append(cfgs, wgtypes.PeerConfig{PublicKey: key, Remove: true})
+		}
+	}
+
+	if len(cfgs) > 0 {
+		if err := c.ConfigureDevice(iface, wgtypes.Config{Peers: cfgs}); err != nil {
+			return 0, fmt.Errorf("configure %s: %w", iface, err)
+		}
 	}
 
 	// wg-quick installs a route for every AllowedIP; configuring a peer over
@@ -118,6 +138,30 @@ func SyncWgPeers(iface string, peers []WgPeer) (applied int, err error) {
 		}
 	}
 	return applied, nil
+}
+
+// peerMatches reports whether a peer already on the interface is exactly what
+// the hub asked for, so it can be skipped rather than rewritten.
+//
+// The preshared key cannot be read back — the kernel never returns it — so a
+// peer that should have one is compared on whether it has one at all. That
+// errs toward leaving it alone, which is right: the only way a PSK changes is
+// if the panel reissues the peer, and that changes the public key too.
+func peerMatches(have wgtypes.Peer, want net.IPNet, psk string) bool {
+	if len(have.AllowedIPs) != 1 {
+		return false
+	}
+	got := have.AllowedIPs[0]
+	if !got.IP.Equal(want.IP) {
+		return false
+	}
+	gOnes, gBits := got.Mask.Size()
+	wOnes, wBits := want.Mask.Size()
+	if gOnes != wOnes || gBits != wBits {
+		return false
+	}
+	hasPSK := have.PresharedKey != (wgtypes.Key{})
+	return hasPSK == (psk != "")
 }
 
 // ensureRoute makes <addr>/32 reachable through the tunnel. Idempotent: `route

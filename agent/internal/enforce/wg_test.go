@@ -1,9 +1,12 @@
 package enforce
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 func TestWgWritesRefuseAnUnmarkedInterface(t *testing.T) {
@@ -59,5 +62,38 @@ func TestAllowedIPIsAlwaysASingleHost(t *testing.T) {
 	}
 	if _, err := allowedIP("not-an-ip"); err == nil {
 		t.Fatal("a non-address must be rejected")
+	}
+}
+
+func TestPeerMatchesLeavesAnUnchangedPeerAlone(t *testing.T) {
+	// The whole point of the diff: a live session must not be torn down because
+	// somebody else's account was edited. wg-panel's counters resetting from
+	// 6.25 MiB to 844 KiB on an agent restart is what this prevents.
+	want := net.IPNet{IP: net.ParseIP("10.10.0.17").To4(), Mask: net.CIDRMask(32, 32)}
+	psk := wgtypes.Key{1, 2, 3}
+
+	have := wgtypes.Peer{AllowedIPs: []net.IPNet{want}, PresharedKey: psk}
+	if !peerMatches(have, want, "somekey") {
+		t.Fatal("an identical peer must be recognised and skipped")
+	}
+
+	// A different address is a real change and must be applied.
+	other := net.IPNet{IP: net.ParseIP("10.10.0.18").To4(), Mask: net.CIDRMask(32, 32)}
+	if peerMatches(have, other, "somekey") {
+		t.Fatal("a moved address must not be treated as unchanged")
+	}
+
+	// Gaining or losing a preshared key is a change.
+	if peerMatches(wgtypes.Peer{AllowedIPs: []net.IPNet{want}}, want, "somekey") {
+		t.Fatal("a peer with no PSK must not match one that should have a PSK")
+	}
+	if peerMatches(have, want, "") {
+		t.Fatal("a peer with a PSK must not match one that should have none")
+	}
+
+	// A peer carrying extra AllowedIPs is not ours to keep.
+	wide := wgtypes.Peer{AllowedIPs: []net.IPNet{want, other}, PresharedKey: psk}
+	if peerMatches(wide, want, "somekey") {
+		t.Fatal("a peer allowed more than its own /32 must be rewritten")
 	}
 }
