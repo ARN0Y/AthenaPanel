@@ -107,6 +107,15 @@ func (e *creditEngine) applyWgPeers(owners map[string]string, peers []enforce.Wg
 		}
 		return 0
 	}
+	if !enforce.WgManaged(e.wgIface) {
+		// Loud, once per sync, and never fatal. The node keeps serving L2TP and
+		// SSTP; it simply is not the WireGuard server the panel thinks it is,
+		// and saying so beats quietly deleting somebody's backhaul.
+		log.Printf("wireguard: %s is not panel-managed (no %s); reporting it but applying nothing"+
+			" — re-run node-bootstrap.sh to create a panel interface",
+			e.wgIface, enforce.MarkerFor(e.wgIface))
+		return 0
+	}
 	n, err := enforce.SyncWgPeers(e.wgIface, peers)
 	if err != nil {
 		log.Printf("wireguard sync failed: %v", err)

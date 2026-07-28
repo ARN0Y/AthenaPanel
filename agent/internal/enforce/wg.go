@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net"
+	"os"
 
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -16,6 +17,31 @@ type WgPeer struct {
 	Address      string // a bare address or a CIDR; the /32 is implied
 }
 
+// MarkerFor is the file node-bootstrap writes beside an interface it created
+// for the panel.
+//
+// It exists because this agent runs as root on machines that already do other
+// things. A WireGuard interface on such a box is very often infrastructure — a
+// backhaul, a WARP tunnel, a relay — and SyncWgPeers replaces the peer list
+// wholesale. Pointing the agent at one of those by mistake, or inheriting a
+// default that happens to match, would silently delete a tunnel that nothing in
+// the panel knows about and nobody would connect to this process.
+//
+// So the rule is: the agent manages an interface it was GIVEN, never one it
+// merely found. Reading counters is always allowed; writing needs the marker.
+func MarkerFor(iface string) string {
+	return "/etc/wireguard/" + iface + ".athena"
+}
+
+// WgManaged reports whether this interface is the panel's to rewrite.
+func WgManaged(iface string) bool {
+	if iface == "" {
+		return false
+	}
+	_, err := os.Stat(MarkerFor(iface))
+	return err == nil
+}
+
 // SyncWgPeers makes the node's WireGuard interface hold exactly the given set.
 //
 // ReplacePeers, not add-then-remove: the hub always sends the complete list, so
@@ -25,10 +51,16 @@ type WgPeer struct {
 //
 // Removing a peer takes effect immediately — WireGuard has no session to tear
 // down, so the next packet from that key is simply not decrypted. That is why
-// this is both the provisioning path and the enforcement path.
+// this is both the provisioning path and the enforcement path — and also why it
+// refuses to touch an unmarked interface.
 func SyncWgPeers(iface string, peers []WgPeer) (applied int, err error) {
 	if iface == "" {
 		return 0, nil
+	}
+	if !WgManaged(iface) {
+		return 0, fmt.Errorf(
+			"refusing to rewrite %q: no %s — the panel only manages interfaces node-bootstrap created for it",
+			iface, MarkerFor(iface))
 	}
 	c, err := wgctrl.New()
 	if err != nil {
@@ -79,6 +111,9 @@ func RemoveWgPeer(iface, publicKey string) error {
 	if iface == "" || publicKey == "" {
 		return nil
 	}
+	if !WgManaged(iface) {
+		return fmt.Errorf("refusing to alter unmanaged interface %q", iface)
+	}
 	key, err := wgtypes.ParseKey(publicKey)
 	if err != nil {
 		return err
@@ -97,8 +132,13 @@ func RemoveWgPeer(iface, publicKey string) error {
 // private key. The panel needs it to build a customer config that points at
 // THIS machine: handing out the master's key produces a config that looks
 // correct and never completes a handshake.
+//
+// Reported only for a MANAGED interface. Publishing the key of some other
+// tunnel would hand customers a config aimed at infrastructure, and the panel
+// would rather say "this node has no WireGuard key yet" than hand out one that
+// points somewhere it should not.
 func WgPublicKey(iface string) (string, uint32) {
-	if iface == "" {
+	if iface == "" || !WgManaged(iface) {
 		return "", 0
 	}
 	c, err := wgctrl.New()

@@ -124,6 +124,11 @@ ListenPort = $WG_PORT
 PrivateKey = $(cat "/etc/wireguard/$WG_IFACE.key")
 EOF
     chmod 600 "/etc/wireguard/$WG_IFACE.conf" "/etc/wireguard/$WG_IFACE.key"
+    # The marker the agent checks before it will ever rewrite this interface's
+    # peer list. A node is usually not a blank machine — it may already carry a
+    # backhaul or a WARP tunnel — and the agent replaces peers wholesale, so it
+    # manages an interface it was GIVEN and never one it merely found.
+    printf 'created by node-bootstrap.sh for the Athena panel\n' > "/etc/wireguard/$WG_IFACE.athena"
     systemctl enable "wg-quick@$WG_IFACE" >/dev/null 2>&1 || true
     # restart, not start: wg-quick is a oneshot that reports "active (exited)"
     # once it has run, so start is a no-op on a stale interface. That exact
