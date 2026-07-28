@@ -13,6 +13,7 @@ over-quota users cannot authenticate.
 """
 
 import asyncio
+import logging
 import os
 import tempfile
 
@@ -22,6 +23,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from . import accel
 from .config import settings
 from .models import LOCAL_NODE_ID, User
+
+log = logging.getLogger("vpn-panel.chap")
 
 _lock = asyncio.Lock()
 
@@ -72,6 +75,31 @@ async def rewrite(db: AsyncSession, node_id: int = LOCAL_NODE_ID) -> None:
     # accel-ppp loads chap-secrets at startup -> reload so changes take effect.
     # (No-op for the xl2tpd/pppd engine, which re-reads on each auth.)
     await accel.reload()
+
+    # Remote nodes keep their own copy of this file, so the same change has to
+    # reach them. The hub is a separate process; a timestamp on the node row is
+    # the channel, and it notices on that node's next report. Failing here must
+    # never break the local write that already succeeded — a node that misses a
+    # nudge still resyncs when it reconnects.
+    try:
+        await _nudge_remote_nodes(db)
+    except Exception:  # noqa: BLE001
+        log.exception("could not flag remote nodes for resync")
+
+
+async def _nudge_remote_nodes(db: AsyncSession) -> None:
+    from datetime import datetime, timezone
+
+    from .models import Node
+
+    now = datetime.now(timezone.utc)
+    rows = (
+        await db.execute(select(Node).where(Node.is_local.is_(False), Node.enabled.is_(True)))
+    ).scalars().all()
+    for node in rows:
+        node.sync_requested_at = now
+    if rows:
+        await db.commit()
 
 
 def _atomic_write(directory: str, path: str, content: str) -> None:
