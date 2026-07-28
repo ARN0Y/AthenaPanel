@@ -24,6 +24,27 @@ router = APIRouter(
 )
 
 
+def _local_address() -> str:
+    """This server's own outbound address, read from the kernel.
+
+    Node 1's address is a property of the machine, so it is discovered rather
+    than typed — an operator editing it could only ever make it wrong, which is
+    also why the local node is not editable. Uses a UDP socket with no traffic:
+    connect() on UDP just selects a route, so this asks the routing table which
+    source address it would use without sending a packet or needing the network
+    to be reachable.
+    """
+    import socket
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+            sk.settimeout(0.2)
+            sk.connect(("1.1.1.1", 53))
+            return sk.getsockname()[0]
+    except OSError:
+        return ""
+
+
 def _local_snapshot() -> tuple[dict, dict]:
     """Stand in for the report node 1 never sends.
 
@@ -88,7 +109,9 @@ def _summarise(node: Node, sessions: int) -> NodeOut:
         name=node.name,
         is_local=node.is_local,
         enabled=node.enabled,
-        address=node.address,
+        # Node 1's address is discovered, never stored: it belongs to the
+        # machine, and a stale row would be worse than no row.
+        address=(_local_address() or node.address) if node.is_local else node.address,
         note=node.note,
         agent_version=node.agent_version,
         hostname=node.hostname,
