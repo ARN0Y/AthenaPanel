@@ -10,10 +10,10 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=/opt/vpn-panel/backend
+# NODEHUB_LISTEN and NODEHUB_TLS are read from here so the operator can move
+# the port without editing a unit file. Defaults (loopback, TLS on) live in
+# app/nodehub.py; the hub refuses to bind a non-loopback address with TLS off.
 EnvironmentFile=/opt/vpn-panel/.env
-# Loopback by default. Exposing the hub publicly is a Phase 2 step and should
-# go through nginx (grpc_pass) so it inherits the TLS setup already on this box.
-Environment=NODEHUB_LISTEN=127.0.0.1:50051
 ExecStart=/opt/vpn-panel/backend/venv/bin/python -m app.nodehub
 Restart=always
 RestartSec=5
