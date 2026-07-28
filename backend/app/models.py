@@ -191,6 +191,15 @@ class Node(Base):
     reconnect_requested_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Set by the panel when an account on this node changes; noticed by the hub,
+    # which is a separate process. A timestamp is enough because the hub always
+    # sends the WHOLE list — how many changes happened in between is irrelevant.
+    sync_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Per-node service ports. A node in one country may have to run WireGuard on
     # 443 because 51820 is blocked, while another uses the default; without this

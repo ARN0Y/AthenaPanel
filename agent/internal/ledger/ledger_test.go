@@ -1,0 +1,169 @@
+package ledger
+
+import (
+	"testing"
+	"time"
+)
+
+const MB = 1024 * 1024
+
+func obs(m map[string]struct{ Rx, Tx uint64 }) map[string]struct{ Rx, Tx uint64 } { return m }
+
+func TestConsumptionIsMeasuredFromTheGrantBaseline(t *testing.T) {
+	l := New()
+	// The session has already moved 500 MB before any credit arrives.
+	l.AddSession("bob", "ppp0", 100, 300*MB, 200*MB)
+	l.ApplyGrant("bob", Grant{ID: 1, GrantedBytes: 100 * MB, ThresholdBytes: 20 * MB})
+
+	if got := l.Consumed("bob"); got != 0 {
+		t.Fatalf("a fresh grant must start at zero, got %d", got)
+	}
+	l.Observe(obs(map[string]struct{ Rx, Tx uint64 }{"ppp0": {Rx: 310 * MB, Tx: 200 * MB}}))
+	if got := l.Consumed("bob"); got != 10*MB {
+		t.Fatalf("only traffic after the grant counts: want 10MB, got %d", got/MB)
+	}
+}
+
+func TestEndedSessionKeepsItsConsumption(t *testing.T) {
+	l := New()
+	l.AddSession("bob", "ppp0", 100, 0, 0)
+	l.ApplyGrant("bob", Grant{ID: 1, GrantedBytes: 100 * MB, ThresholdBytes: 20 * MB})
+	l.Observe(obs(map[string]struct{ Rx, Tx uint64 }{"ppp0": {Rx: 30 * MB, Tx: 0}}))
+	l.RemoveSession("bob", "ppp0")
+
+	if got := l.Consumed("bob"); got != 30*MB {
+		t.Fatalf("a finished session must not return its credit: want 30MB, got %d", got/MB)
+	}
+	// Reconnecting must not reset anything either.
+	l.AddSession("bob", "ppp1", 101, 0, 0)
+	l.Observe(obs(map[string]struct{ Rx, Tx uint64 }{"ppp1": {Rx: 5 * MB, Tx: 0}}))
+	if got := l.Consumed("bob"); got != 35*MB {
+		t.Fatalf("reconnect must add, not reset: want 35MB, got %d", got/MB)
+	}
+}
+
+func TestCounterResetIsNotNegative(t *testing.T) {
+	l := New()
+	l.AddSession("bob", "ppp0", 100, 900*MB, 900*MB)
+	l.ApplyGrant("bob", Grant{ID: 1, GrantedBytes: 100 * MB})
+	// Interface bounced: counters restart from a small number.
+	l.Observe(obs(map[string]struct{ Rx, Tx uint64 }{"ppp0": {Rx: 2 * MB, Tx: 1 * MB}}))
+	if got := l.Consumed("bob"); got != 3*MB {
+		t.Fatalf("a reset counter is new traffic, not a negative: want 3MB, got %d", got/MB)
+	}
+}
+
+func TestRefillsEarlyAtTheThreshold(t *testing.T) {
+	l := New()
+	l.AddSession("bob", "ppp0", 100, 0, 0)
+	l.ApplyGrant("bob", Grant{ID: 7, GrantedBytes: 100 * MB, ThresholdBytes: 20 * MB})
+
+	l.Observe(obs(map[string]struct{ Rx, Tx uint64 }{"ppp0": {Rx: 50 * MB}}))
+	if v := l.Evaluate(true); len(v) != 0 {
+		t.Fatalf("must not ask at half a grant, got %+v", v)
+	}
+	l.Observe(obs(map[string]struct{ Rx, Tx uint64 }{"ppp0": {Rx: 81 * MB}}))
+	v := l.Evaluate(true)
+	if len(v) != 1 || v[0].Decision != RequestMore || v[0].Reason != "THRESHOLD" {
+		t.Fatalf("must ask once past the threshold, got %+v", v)
+	}
+	if v[0].GrantID != 7 {
+		t.Fatalf("the request must quote the grant it spent: got %d", v[0].GrantID)
+	}
+	// It must not ask again while that request is in flight.
+	l.Observe(obs(map[string]struct{ Rx, Tx uint64 }{"ppp0": {Rx: 85 * MB}}))
+	if v := l.Evaluate(true); len(v) != 0 {
+		t.Fatalf("must not re-ask while awaiting, got %+v", v)
+	}
+}
+
+func TestFinalGrantTerminatesAtExhaustion(t *testing.T) {
+	l := New()
+	l.AddSession("bob", "ppp0", 100, 0, 0)
+	l.ApplyGrant("bob", Grant{ID: 9, GrantedBytes: 30 * MB, Final: true})
+
+	l.Observe(obs(map[string]struct{ Rx, Tx uint64 }{"ppp0": {Rx: 29 * MB}}))
+	if v := l.Evaluate(true); len(v) != 0 {
+		t.Fatalf("still inside the final grant, got %+v", v)
+	}
+	l.Observe(obs(map[string]struct{ Rx, Tx uint64 }{"ppp0": {Rx: 30 * MB}}))
+	v := l.Evaluate(true)
+	if len(v) != 1 || v[0].Decision != Terminate {
+		t.Fatalf("a spent final grant must terminate, got %+v", v)
+	}
+	if len(v[0].Pids) != 1 || v[0].Pids[0] != 100 {
+		t.Fatalf("the verdict must carry what to kill, got %+v", v[0])
+	}
+}
+
+func TestHubDownSpendsTheGrantThenStops(t *testing.T) {
+	l := New()
+	l.AddSession("bob", "ppp0", 100, 0, 0)
+	l.ApplyGrant("bob", Grant{ID: 3, GrantedBytes: 100 * MB, ThresholdBytes: 20 * MB})
+
+	// Past the threshold, but there is nobody to ask.
+	l.Observe(obs(map[string]struct{ Rx, Tx uint64 }{"ppp0": {Rx: 90 * MB}}))
+	if v := l.Evaluate(false); len(v) != 0 {
+		t.Fatalf("with the hub down it should keep serving the held credit, got %+v", v)
+	}
+	// Grant fully spent: now it must stop, because the grant WAS the budget.
+	l.Observe(obs(map[string]struct{ Rx, Tx uint64 }{"ppp0": {Rx: 100 * MB}}))
+	v := l.Evaluate(false)
+	if len(v) != 1 || v[0].Decision != Terminate {
+		t.Fatalf("a spent grant with no hub must terminate, got %+v", v)
+	}
+}
+
+func TestRefusalTerminatesImmediately(t *testing.T) {
+	l := New()
+	l.AddSession("bob", "ppp0", 100, 0, 0)
+	l.ApplyGrant("bob", Grant{ID: 4, Refused: true, RefuseReason: "quota exhausted"})
+	v := l.Evaluate(true)
+	if len(v) != 1 || v[0].Decision != Terminate || v[0].Reason != "quota exhausted" {
+		t.Fatalf("a refusal must terminate with its reason, got %+v", v)
+	}
+}
+
+func TestValidityForcesAReportEvenWhenIdle(t *testing.T) {
+	l := New()
+	l.AddSession("bob", "ppp0", 100, 0, 0)
+	l.ApplyGrant("bob", Grant{ID: 5, GrantedBytes: 100 * MB, ThresholdBytes: 20 * MB,
+		Validity: 10 * time.Millisecond})
+	if v := l.Evaluate(true); len(v) != 0 {
+		t.Fatalf("nothing to do yet, got %+v", v)
+	}
+	time.Sleep(15 * time.Millisecond)
+	v := l.Evaluate(true)
+	if len(v) != 1 || v[0].Reason != "VALIDITY" {
+		t.Fatalf("validity must force a reconcile, got %+v", v)
+	}
+}
+
+func TestOvershootIsOneTickOfTraffic(t *testing.T) {
+	// The guarantee, measured: a user on a final grant is cut at the first tick
+	// after exhaustion, so the excess is whatever one tick carried.
+	const rateBps = 100_000_000
+	const tickMs = 1000
+	perTick := uint64(rateBps / 8 * tickMs / 1000)
+
+	l := New()
+	l.AddSession("bob", "ppp0", 100, 0, 0)
+	l.ApplyGrant("bob", Grant{ID: 1, GrantedBytes: 500 * MB, Final: true})
+
+	var moved uint64
+	for i := 0; i < 10000; i++ {
+		moved += perTick
+		l.Observe(obs(map[string]struct{ Rx, Tx uint64 }{"ppp0": {Rx: moved}}))
+		v := l.Evaluate(true)
+		if len(v) == 1 && v[0].Decision == Terminate {
+			over := moved - 500*MB
+			if over >= perTick {
+				t.Fatalf("overshoot %d must be under one tick %d", over, perTick)
+			}
+			t.Logf("terminated %d bytes (%.2f MB) past the grant; one tick is %.2f MB",
+				over, float64(over)/MB, float64(perTick)/MB)
+			return
+		}
+	}
+	t.Fatal("never terminated")
+}

@@ -17,6 +17,7 @@ anything is allowed to act on them.
 """
 
 import asyncio
+import itertools
 import json
 import logging
 import os
@@ -26,7 +27,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from . import nodes as nodes_mod
+from . import credit as credit_mod, nodecredit, nodes as nodes_mod
 from .config import settings
 from .database import AsyncSessionLocal
 from .models import Node
@@ -44,6 +45,10 @@ REPORT_INTERVAL_SECONDS = 15
 # payload is written to Node.last_report so that any other process can read it
 # — the hub's memory is not a place other tools can look.
 LAST_REPORT: dict[int, dict] = {}
+
+# Monotonic per hub process. A node only ever compares it for equality with
+# what it last applied, so restarting the hub simply causes one extra sync.
+_sync_ids = itertools.count(1)
 
 
 def _listen_address() -> str:
@@ -186,7 +191,7 @@ async def _record_report(node_id: int, report) -> None:
     async with AsyncSessionLocal() as db:
         node = await db.get(Node, node_id)
         if node is None:
-            return
+            return None, None
         previous: dict[str, tuple[int, int]] = {}
         if node.last_report:
             try:
@@ -206,7 +211,7 @@ async def _record_report(node_id: int, report) -> None:
         node.last_seen_at = now
         node.last_report = json.dumps(payload, separators=(",", ":"))
         await db.commit()
-        return node.reconnect_requested_at
+        return node.reconnect_requested_at, node.sync_requested_at
 
 
 def build_servicer():
@@ -219,6 +224,7 @@ def build_servicer():
             reports = 0
             peer = context.peer()
             connected_at = datetime.now(timezone.utc)
+            last_sync_at: datetime | None = None
             try:
                 async for msg in request_iterator:
                     kind = msg.WhichOneof("payload")
@@ -263,16 +269,68 @@ def build_servicer():
                                 node_name=node.name,
                                 report_interval_seconds=REPORT_INTERVAL_SECONDS,
                                 protocol_version=PROTOCOL_VERSION,
+                                credit_poll_ms=credit_mod.CREDIT_POLL_MS,
                             )
                         )
+                        # A reconnecting agent has no idea what it missed, so it
+                        # gets the whole list immediately rather than waiting for
+                        # the next change. Cheap, and it removes a whole class of
+                        # "the node was serving a deleted user" bug.
+                        sync_id = next(_sync_ids)
+                        yield nodehub_pb2.HubMessage(
+                            user_sync=await nodecredit.build_sync(node.id, sync_id)
+                        )
+                        last_sync_at = datetime.now(timezone.utc)
                         continue
 
                     if node is None:
                         log.warning("%s: message before hello, dropping stream", peer)
                         return
 
+                    if kind == "credit_request":
+                        req = msg.credit_request
+                        reason = nodehub_pb2.CreditRequest.Reason.Name(req.reason)
+                        grant = await nodecredit.handle_credit_request(
+                            node_id=node.id,
+                            username=req.username,
+                            reason=reason,
+                            consumed_bytes=req.consumed_bytes,
+                            grant_id=req.grant_id,
+                            session_rx=req.session_rx_bytes,
+                            session_tx=req.session_tx_bytes,
+                            ifname=req.ifname,
+                        )
+                        yield nodehub_pb2.HubMessage(
+                            credit_grant=nodehub_pb2.CreditGrant(
+                                username=req.username,
+                                grant_id=grant.grant_id,
+                                granted_bytes=grant.granted_bytes,
+                                threshold_bytes=grant.threshold_bytes,
+                                validity_seconds=grant.validity_seconds,
+                                final=grant.final,
+                                refused=grant.refused,
+                                refuse_reason=grant.refuse_reason,
+                                on_hub_unreachable=(
+                                    nodehub_pb2.CreditGrant.CONTINUE_THEN_TERMINATE
+                                ),
+                            )
+                        )
+                        continue
+
+                    if kind == "sync_ack":
+                        await nodecredit.mark_synced(
+                            node.id, msg.sync_ack.sync_id,
+                            msg.sync_ack.ok, msg.sync_ack.detail,
+                        )
+                        log.info(
+                            "node %d applied sync %d: %d user(s)%s",
+                            node.id, msg.sync_ack.sync_id, msg.sync_ack.users_applied,
+                            "" if msg.sync_ack.ok else f" FAILED: {msg.sync_ack.detail}",
+                        )
+                        continue
+
                     if kind == "report":
-                        requested = await _record_report(node.id, msg.report)
+                        requested, sync_requested = await _record_report(node.id, msg.report)
                         # An operator asked this node to reconnect. Dropping the
                         # stream is enough: the agent's own backoff brings it
                         # straight back, and it re-derives everything from the
@@ -280,6 +338,17 @@ def build_servicer():
                         if requested is not None and requested > connected_at:
                             log.info("node %d: reconnect requested, dropping the stream", node.id)
                             return
+                        # The panel writes a timestamp when an account changes;
+                        # this is the only channel between the two processes.
+                        if sync_requested is not None and (
+                            last_sync_at is None or sync_requested > last_sync_at
+                        ):
+                            sync_id = next(_sync_ids)
+                            log.info("node %d: pushing user sync %d", node.id, sync_id)
+                            yield nodehub_pb2.HubMessage(
+                                user_sync=await nodecredit.build_sync(node.id, sync_id)
+                            )
+                            last_sync_at = datetime.now(timezone.utc)
                         reports += 1
                         if reports == 1 or reports % 40 == 0:
                             r = LAST_REPORT[node.id]
