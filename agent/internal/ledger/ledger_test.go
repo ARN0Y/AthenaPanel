@@ -225,3 +225,47 @@ func TestPidsOfUnknownUserIsEmpty(t *testing.T) {
 		t.Fatalf("unknown user must hold no sessions, got %d", n)
 	}
 }
+
+func TestCloseSessionBillsTheBytesTheLastPollMissed(t *testing.T) {
+	// A link drops between polls. The interface is gone before ip-down runs, so
+	// the only record of those last bytes is what pppd reports; without taking
+	// it, every session leaks up to one poll interval of the customer's rate.
+	l := New()
+	l.AddSession("bob", "ppp0", 100, 0, 0)
+	l.ApplyGrant("bob", Grant{ID: 1, GrantedBytes: 100 * MB, ThresholdBytes: 20 * MB})
+	l.Observe(obs(map[string]struct{ Rx, Tx uint64 }{"ppp0": {Rx: 4 * MB, Tx: 6 * MB}}))
+	if got := l.Consumed("bob"); got != 10*MB {
+		t.Fatalf("observed consumption: %d", got)
+	}
+	// pppd saw 3 MB more than the last poll did.
+	l.CloseSession("bob", "ppp0", 5*MB, 8*MB)
+	if got := l.Consumed("bob"); got != 13*MB {
+		t.Fatalf("final consumption must include what the poll missed, got %d MB", got/MB)
+	}
+}
+
+func TestCloseSessionNeverRefundsMeasuredTraffic(t *testing.T) {
+	// A hook that under-reports must not be able to hand credit back.
+	l := New()
+	l.AddSession("bob", "ppp0", 100, 0, 0)
+	l.ApplyGrant("bob", Grant{ID: 1, GrantedBytes: 100 * MB})
+	l.Observe(obs(map[string]struct{ Rx, Tx uint64 }{"ppp0": {Rx: 9 * MB, Tx: 9 * MB}}))
+	l.CloseSession("bob", "ppp0", 1, 1)
+	if got := l.Consumed("bob"); got != 18*MB {
+		t.Fatalf("measured traffic must stand, got %d MB", got/MB)
+	}
+}
+
+func TestRemoveSessionStillWorks(t *testing.T) {
+	l := New()
+	l.AddSession("bob", "ppp0", 100, 0, 0)
+	l.ApplyGrant("bob", Grant{ID: 1, GrantedBytes: 100 * MB})
+	l.Observe(obs(map[string]struct{ Rx, Tx uint64 }{"ppp0": {Rx: 7 * MB}}))
+	l.RemoveSession("bob", "ppp0")
+	if got := l.Consumed("bob"); got != 7*MB {
+		t.Fatalf("an ended session keeps its consumption, got %d MB", got/MB)
+	}
+	if n := l.SessionCount("bob"); n != 0 {
+		t.Fatalf("session should be gone, got %d", n)
+	}
+}

@@ -127,6 +127,21 @@ func (l *Ledger) AddSession(username, ifname string, pid int32, rx, tx uint64) {
 // RemoveSession folds a finished session's consumption into the closed total.
 // Dropping it instead would hand the user their spent credit back.
 func (l *Ledger) RemoveSession(username, ifname string) {
+	l.CloseSession(username, ifname, 0, 0)
+}
+
+// CloseSession is RemoveSession with the final counters pppd reported.
+//
+// The last poll can be up to one tick behind the moment a link drops, and the
+// interface is gone by the time ip-down runs, so those bytes cannot be read
+// back — they would simply never be billed. pppd counts the same thing from the
+// same origin (the interface exists only for this session), so its closing
+// figure is authoritative and is taken as a floor. `max`, not assignment: a
+// hook that under-reports must not be able to refund traffic that was measured.
+//
+// This is the same correction the master applies to its own sessions; without
+// it every remote session leaks one poll interval of a customer's line rate.
+func (l *Ledger) CloseSession(username, ifname string, finalRx, finalTx uint64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	u, ok := l.users[username]
@@ -134,6 +149,12 @@ func (l *Ledger) RemoveSession(username, ifname string) {
 		return
 	}
 	if s, ok := u.sessions[ifname]; ok {
+		if finalRx > s.Rx {
+			s.Rx = finalRx
+		}
+		if finalTx > s.Tx {
+			s.Tx = finalTx
+		}
 		u.closedBytes += s.consumed()
 		delete(u.sessions, ifname)
 	}

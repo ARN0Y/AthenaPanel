@@ -81,8 +81,12 @@ func (e *creditEngine) OnUp(ev hooks.Event) (bool, string) {
 }
 
 func (e *creditEngine) OnDown(ev hooks.Event) {
-	e.led.RemoveSession(ev.Username, ev.Ifname)
-	log.Printf("session down: %s on %s", ev.Username, ev.Ifname)
+	// Close with pppd's own totals, not just the last poll: the interface is
+	// already gone, so anything moved after the final tick can never be read
+	// back and would go unbilled on every single session.
+	e.led.CloseSession(ev.Username, ev.Ifname, ev.InOctets, ev.OutOctets)
+	log.Printf("session down: %s on %s (%d/%d bytes reported)",
+		ev.Username, ev.Ifname, ev.InOctets, ev.OutOctets)
 
 	// Report immediately rather than at the next tick: this is the last chance
 	// to bill the session, and the hub needs it before it decides anything else
