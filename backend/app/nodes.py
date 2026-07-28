@@ -71,6 +71,38 @@ async def ensure_local(db: AsyncSession) -> Node:
     return node
 
 
+def effective_endpoints(node: Node | None, app_settings: dict) -> dict[str, str]:
+    """What a customer on this node is told to connect to.
+
+    The node's OWN address is never part of this. That address is the machine
+    abroad; customers reach it through a relay, and handing out the real one
+    would both fail to connect and expose infrastructure that is meant to stay
+    behind the entry.
+
+    A node with no external proxy of its own inherits the panel-wide setting.
+    That is deliberate rather than lazy: it is what lets node 1 keep serving the
+    accounts that predate nodes without anything being copied into it, so there
+    is exactly one place to change an address that every node shares.
+    """
+    def pick(node_value: str | None, fallback_key: str) -> str:
+        value = (node_value or "").strip()
+        return value or (app_settings.get(fallback_key) or "").strip()
+
+    wg = pick(node.ext_wg_endpoint if node else "", "wg_endpoint")
+    # wg_endpoint is host:port panel-wide, while a node carries host and port
+    # separately. Respect an explicit port in either place, preferring the one
+    # the operator typed into the endpoint itself.
+    if node is not None and wg and ":" not in wg:
+        wg = f"{wg}:{node.wg_port}"
+
+    return {
+        "l2tp": pick(node.ext_l2tp_address if node else "", "server_address"),
+        "l2tp_raw": pick(node.ext_l2tp_raw_address if node else "", "l2tp_raw_address"),
+        "sstp": pick(node.ext_sstp_address if node else "", "sstp_address"),
+        "wg": wg,
+    }
+
+
 def accumulate_traffic(
     node: Node,
     counters: dict[str, tuple[int, int]],

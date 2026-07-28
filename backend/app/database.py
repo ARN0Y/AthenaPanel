@@ -55,6 +55,7 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("created_by_admin_id", "INTEGER"),
         ("outbound", "VARCHAR(16) NOT NULL DEFAULT 'direct'"),
         ("l2tp_mode", "VARCHAR(8) NOT NULL DEFAULT 'ipsec'"),
+        ("node_id", "INTEGER NOT NULL DEFAULT 1"),
     ],
     # Self-healing accounting (v2): per-session billing baseline + proto + a
     # debounce counter so a transient sysfs miss never drops a live session.
@@ -68,6 +69,12 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     ],
     "usage_samples": [("node_id", "INTEGER NOT NULL DEFAULT 1")],
     "accounting": [("node_id", "INTEGER NOT NULL DEFAULT 1")],
+    "nodes": [
+        ("ext_l2tp_address", "VARCHAR(255) NOT NULL DEFAULT ''"),
+        ("ext_l2tp_raw_address", "VARCHAR(255) NOT NULL DEFAULT ''"),
+        ("ext_sstp_address", "VARCHAR(255) NOT NULL DEFAULT ''"),
+        ("ext_wg_endpoint", "VARCHAR(255) NOT NULL DEFAULT ''"),
+    ],
     "wg_peers": [
         ("online_since", "DATETIME"),
         ("session_base_rx", "BIGINT NOT NULL DEFAULT 0"),
@@ -126,6 +133,14 @@ _PG_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("nodes", "wg_port", "INTEGER NOT NULL DEFAULT 51820"),
     ("nodes", "sstp_port", "INTEGER NOT NULL DEFAULT 443"),
     ("nodes", "l2tp_port", "INTEGER NOT NULL DEFAULT 1701"),
+    # External proxy (what the customer dials) — empty falls back to the
+    # panel-wide setting, so existing users are untouched.
+    ("nodes", "ext_l2tp_address", "VARCHAR(255) NOT NULL DEFAULT ''"),
+    ("nodes", "ext_l2tp_raw_address", "VARCHAR(255) NOT NULL DEFAULT ''"),
+    ("nodes", "ext_sstp_address", "VARCHAR(255) NOT NULL DEFAULT ''"),
+    ("nodes", "ext_wg_endpoint", "VARCHAR(255) NOT NULL DEFAULT ''"),
+    # Every pre-existing account stays on node 1, which is where it already is.
+    ("users", "node_id", "INTEGER NOT NULL DEFAULT 1"),
 ]
 
 

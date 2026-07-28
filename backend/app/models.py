@@ -100,6 +100,15 @@ class User(Base):
     # "ipsec" = L2TP/IPsec (default, encrypted) | "raw" = L2TP without IPsec.
     # Selects which entry host the customer is given; see config.l2tp_raw_address.
     l2tp_mode: Mapped[str] = mapped_column(String(8), default="ipsec", nullable=False)
+    # Which node terminates this user. Defaults to LOCAL_NODE_ID so every
+    # account that existed before nodes stays exactly where it already is, and
+    # so a user created without thinking about nodes lands somewhere real
+    # instead of nowhere. One node per user is the business rule; if that ever
+    # becomes a set, this column becomes the "primary" and a join table carries
+    # the rest, without any of the surrounding logic changing shape.
+    node_id: Mapped[int] = mapped_column(
+        Integer, default=LOCAL_NODE_ID, index=True, nullable=False
+    )
 
     # Which admin owns/created this user (NULL = legacy/superadmin-owned)
     created_by_admin_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
@@ -189,6 +198,26 @@ class Node(Base):
     wg_port: Mapped[int] = mapped_column(Integer, default=51820, nullable=False)
     sstp_port: Mapped[int] = mapped_column(Integer, default=443, nullable=False)
     l2tp_port: Mapped[int] = mapped_column(Integer, default=1701, nullable=False)
+
+    # --- external proxy: what the CUSTOMER connects to -----------------------
+    #
+    # `address` above is the node's own address — the machine abroad, used by us
+    # for operations and never handed to a customer. These four are the other
+    # half: the relay a customer actually dials, which in this deployment is an
+    # Iranian entry that forwards over the backhaul. The two are genuinely
+    # different hosts and conflating them produces configs that cannot connect.
+    #
+    # They are per-protocol because in practice they already are: L2TP/IPsec,
+    # SSTP and WireGuard share one entry while raw L2TP needs its own, since
+    # IPsec is negotiated before the user is known and the two modes cannot live
+    # on the same address.
+    #
+    # Empty means "use the panel-wide setting". That is what keeps node 1
+    # behaving exactly as it does today without copying anything into it.
+    ext_l2tp_address: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    ext_l2tp_raw_address: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    ext_sstp_address: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    ext_wg_endpoint: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     note: Mapped[str] = mapped_column(Text, default="", nullable=False)
 

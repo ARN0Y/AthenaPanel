@@ -30,7 +30,15 @@ export function buildProfile(user: User, s: ProfileSettings | undefined): Profil
   if (!s) return { blocks: [], rawUnconfigured: false };
 
   const raw = isRawMode(user);
-  const rawAddr = (s.l2tp_raw_address || "").trim();
+  // Addresses come from the USER, not from the panel-wide settings: the backend
+  // has already resolved them from that user's node external proxy, falling
+  // back to the global value. Reading the global here would hand every customer
+  // the same relay regardless of which node actually terminates them.
+  // The older fields are kept as a fallback so a client built against a panel
+  // that predates per-node endpoints still produces a working profile.
+  const l2tpAddr = (user.endpoint_l2tp || s.server_address || "").trim();
+  const rawAddr = (user.endpoint_l2tp_raw || s.l2tp_raw_address || "").trim();
+  const sstpAddr = (user.endpoint_sstp || s.sstp_address || "").trim();
   const rawUnconfigured = s.l2tp_enabled && raw && !rawAddr;
   const blocks: ProfileBlock[] = [];
 
@@ -50,7 +58,7 @@ export function buildProfile(user: User, s: ProfileSettings | undefined): Profil
         : {
             title: "L2TP/IPsec",
             text: [
-              `Server_Address : ${s.server_address}`,
+              `Server_Address : ${l2tpAddr}`,
               `L2TP/IPsec with pre-shared key`,
               // Labelled like every other line so the admin can read the key off
               // the card directly. Never render a blank value: an empty VPN_PSK
@@ -67,7 +75,7 @@ export function buildProfile(user: User, s: ProfileSettings | undefined): Profil
     blocks.push({
       title: "SSTP",
       text: [
-        `Server_Address : ${s.sstp_address}`,
+        `Server_Address : ${sstpAddr}`,
         `SSTP (https / port 443)`,
         `Username : ${user.username}`,
         `Password : ${user.password}`,

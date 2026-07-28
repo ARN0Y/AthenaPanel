@@ -75,6 +75,15 @@ export interface User {
   sub_token: string;
   outbound: string;
   l2tp_mode: string;   // "ipsec" | "raw"
+  node_id: number;
+  node_name: string;
+  /** Already resolved from this user's node (its external proxy), falling back
+   *  to the panel-wide setting. Never the node's own address — that is the
+   *  machine abroad, which no customer connects to directly. */
+  endpoint_l2tp: string;
+  endpoint_l2tp_raw: string;
+  endpoint_sstp: string;
+  endpoint_wg: string;
 }
 
 export interface Me {
@@ -258,6 +267,7 @@ export interface UserPayload {
   note?: string;
   outbound?: string;
   l2tp_mode?: string;
+  node_id?: number;
 }
 
 export interface OutboundStatus {
@@ -333,6 +343,12 @@ export interface NodeInfo {
   wg_port: number;
   sstp_port: number;
   l2tp_port: number;
+  /** What customers dial for this node — the relay in front of it, not the
+   *  node's own address. Empty means "use the panel-wide setting". */
+  ext_l2tp_address: string;
+  ext_l2tp_raw_address: string;
+  ext_sstp_address: string;
+  ext_wg_endpoint: string;
 }
 
 /** Returned once, on registration or rotation. The panel keeps no copy of the
@@ -354,6 +370,10 @@ export interface NodePayload {
   wg_port?: number;
   sstp_port?: number;
   l2tp_port?: number;
+  ext_l2tp_address?: string;
+  ext_l2tp_raw_address?: string;
+  ext_sstp_address?: string;
+  ext_wg_endpoint?: string;
 }
 
 export const api = {

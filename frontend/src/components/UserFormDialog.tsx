@@ -22,6 +22,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { api, type User, type UserPayload } from "@/lib/api";
+import { useAuth } from "@/hooks/useAuth";
 import { bytesToGb, gbToBytes, kbpsToMbps, mbpsToKbps } from "@/lib/format";
 
 interface UserFormDialogProps {
@@ -105,11 +106,21 @@ export function UserFormDialog({
   const [isActive, setIsActive] = React.useState(true);
   const [outbound, setOutbound] = React.useState("direct");
   const [l2tpMode, setL2tpMode] = React.useState("ipsec");
+  const [nodeId, setNodeId] = React.useState(1);
 
   // No raw entry host configured -> raw mode has no reachable endpoint, so the
   // option stays hidden (the contract stated in config.l2tp_raw_address). Still
   // shown for a user already ON raw, so an existing setting stays visible/fixable.
+  const { isSuperadmin } = useAuth();
   const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: api.settings });
+  // Superadmin-only endpoint. A reseller gets nothing back and the selector
+  // stays hidden, leaving the account on whichever node it already has.
+  const { data: nodes } = useQuery({
+    queryKey: ["nodes"],
+    queryFn: api.listNodes,
+    enabled: isSuperadmin,
+    retry: false,
+  });
   const rawConfigured = !!settings?.l2tp_raw_address?.trim();
   const showModeSelect = rawConfigured || l2tpMode === "raw";
 
@@ -126,6 +137,7 @@ export function UserFormDialog({
       setIsActive(user.is_active);
       setOutbound(user.outbound || "direct");
       setL2tpMode(user.l2tp_mode || "ipsec");
+      setNodeId(user.node_id || 1);
     } else {
       setUsername("");
       setPassword(randomPassword());
@@ -151,6 +163,7 @@ export function UserFormDialog({
       note,
       outbound,
       l2tp_mode: l2tpMode,
+      node_id: nodeId,
     };
     if (!isEdit) {
       payload.username = username;
@@ -238,6 +251,29 @@ export function UserFormDialog({
               <Field label="Expiry date" hint="empty = never" htmlFor="u-expiry">
                 <Input id="u-expiry" type="date" value={expiry} onChange={(e) => setExpiry(e.target.value)} />
               </Field>
+              {isSuperadmin && (nodes?.length ?? 0) > 1 && (
+                <Field
+                  label="Node"
+                  hint="which server terminates this user"
+                  htmlFor="u-node"
+                >
+                  <Select value={String(nodeId)} onValueChange={(v) => setNodeId(Number(v))}>
+                    <SelectTrigger id="u-node">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(nodes ?? [])
+                        .filter((n) => n.enabled)
+                        .map((n) => (
+                          <SelectItem key={n.id} value={String(n.id)}>
+                            {n.name}
+                            {!n.online && " — offline"}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+              )}
               <Field label="Outbound" htmlFor="u-outbound">
                 <Select value={outbound} onValueChange={setOutbound}>
                   <SelectTrigger id="u-outbound">

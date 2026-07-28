@@ -120,6 +120,7 @@ class UserUpdate(BaseModel):
     note: str | None = None
     outbound: str | None = None
     l2tp_mode: str | None = None
+    node_id: int | None = None
 
 
 class UserOut(BaseModel):
@@ -148,6 +149,16 @@ class UserOut(BaseModel):
     sub_token: str = ""  # signed token for the public /sub/<token> link
     outbound: str = "direct"
     l2tp_mode: str = "ipsec"
+    node_id: int = 1
+    node_name: str = ""
+    # The addresses THIS user should be handed, already resolved from their
+    # node's external proxy with the panel-wide setting as fallback. Resolved
+    # server-side so the panel, the subscription page and anything else agree by
+    # construction instead of each re-deriving it and drifting.
+    endpoint_l2tp: str = ""
+    endpoint_l2tp_raw: str = ""
+    endpoint_sstp: str = ""
+    endpoint_wg: str = ""
 
 
 class BulkAction(BaseModel):
@@ -335,6 +346,10 @@ class NodeUpdate(BaseModel):
     wg_port: int | None = None
     sstp_port: int | None = None
     l2tp_port: int | None = None
+    ext_l2tp_address: str | None = None
+    ext_l2tp_raw_address: str | None = None
+    ext_sstp_address: str | None = None
+    ext_wg_endpoint: str | None = None
 
 
 class NodeCreated(BaseModel):
@@ -381,3 +396,8 @@ class NodeOut(BaseModel):
     wg_port: int = 51820
     sstp_port: int = 443
     l2tp_port: int = 1701
+    # Customer-facing. Empty means the node inherits the panel-wide setting.
+    ext_l2tp_address: str = ""
+    ext_l2tp_raw_address: str = ""
+    ext_sstp_address: str = ""
+    ext_wg_endpoint: str = ""

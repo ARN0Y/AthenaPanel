@@ -4,11 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import audit, chap_secrets, livecache, outbound, pppd
+from .. import appsettings, audit, chap_secrets, livecache, nodes as nodes_mod, outbound, pppd
 from ..subtoken import make_token
 from ..database import get_session
 from ..deps import get_current_admin
-from ..models import LOCAL_NODE_ID, Admin, User
+from ..models import LOCAL_NODE_ID, Admin, Node, User
 from ..models import Session as SessionRow
 from ..schemas import BulkAction, UserCreate, UserOut, UserUpdate
 
@@ -27,6 +27,7 @@ _FIELD_LABELS = {
     "note": "note",
     "outbound": "outbound",
     "l2tp_mode": "L2TP mode",
+    "node_id": "node",
     "username": "username",
     "password": "password",
 }
@@ -125,7 +126,39 @@ def _norm_mode(value: str | None) -> str:
     return "raw" if str(value or "").strip().lower() == "raw" else "ipsec"
 
 
-def _to_out(user: User, online: set[str], names: dict[int, str], live_bytes: int = 0) -> UserOut:
+class _NodeCtx:
+    """Node rows plus panel-wide settings, fetched once per request.
+
+    _to_out runs for every user, and resolving endpoints needs both. Loading
+    them per user would turn one list call into ~200 queries.
+    """
+
+    __slots__ = ("by_id", "app_settings")
+
+    def __init__(self, by_id: dict[int, Node], app_settings: dict):
+        self.by_id = by_id
+        self.app_settings = app_settings
+
+    def endpoints(self, node_id: int) -> dict[str, str]:
+        return nodes_mod.effective_endpoints(self.by_id.get(node_id), self.app_settings)
+
+    def name(self, node_id: int) -> str:
+        node = self.by_id.get(node_id)
+        return node.name if node else f"#{node_id}"
+
+
+async def _node_ctx(db: AsyncSession) -> _NodeCtx:
+    rows = (await db.execute(select(Node))).scalars().all()
+    return _NodeCtx({n.id: n for n in rows}, await appsettings.get_all(db))
+
+
+def _to_out(
+    user: User,
+    online: set[str],
+    names: dict[int, str],
+    live_bytes: int = 0,
+    ctx: _NodeCtx | None = None,
+) -> UserOut:
     out = UserOut.model_validate(user)
     out.password = user.password_hash  # plaintext, for the copy-able profile
     # Effective usage = committed used_bytes + this session's live bytes.
@@ -138,7 +171,32 @@ def _to_out(user: User, online: set[str], names: dict[int, str], live_bytes: int
     out.sub_token = make_token(user.id)
     out.outbound = outbound.normalize(user.outbound)
     out.l2tp_mode = _norm_mode(user.l2tp_mode)
+    out.node_id = user.node_id or LOCAL_NODE_ID
+    if ctx is not None:
+        out.node_name = ctx.name(out.node_id)
+        ep = ctx.endpoints(out.node_id)
+        out.endpoint_l2tp = ep["l2tp"]
+        out.endpoint_l2tp_raw = ep["l2tp_raw"]
+        out.endpoint_sstp = ep["sstp"]
+        out.endpoint_wg = ep["wg"]
     return out
+
+
+async def _validate_node(db: AsyncSession, node_id: int | None) -> int | None:
+    """Reject an assignment to a node that does not exist or is switched off.
+
+    Silently accepting it would strand the account: chap-secrets is only pushed
+    to real nodes, so the user would authenticate nowhere and the panel would
+    show nothing wrong.
+    """
+    if node_id is None:
+        return None
+    node = (await db.execute(select(Node).where(Node.id == node_id))).scalar_one_or_none()
+    if node is None:
+        raise HTTPException(status_code=400, detail="No such node")
+    if not node.enabled:
+        raise HTTPException(status_code=400, detail=f"Node '{node.name}' is disabled")
+    return node_id
 
 
 def _owns(admin: Admin, user: User) -> bool:
@@ -163,7 +221,8 @@ async def list_users(admin: Admin = Depends(get_current_admin), db: AsyncSession
     online = livecache.snapshot()["online"]
     names = await _admin_names(db)
     live = await _live_by_user(db)
-    return [_to_out(u, online, names, live.get(u.username, 0)) for u in users]
+    ctx = await _node_ctx(db)
+    return [_to_out(u, online, names, live.get(u.username, 0), ctx) for u in users]
 
 
 @router.post("", response_model=UserOut, status_code=status.HTTP_201_CREATED)
@@ -205,7 +264,7 @@ async def create_user(
     await chap_secrets.rewrite(db)
     online = livecache.snapshot()["online"]
     names = await _admin_names(db)
-    return _to_out(user, online, names)
+    return _to_out(user, online, names, 0, await _node_ctx(db))
 
 
 @router.get("/{user_id}", response_model=UserOut)
@@ -214,7 +273,7 @@ async def get_user(user_id: int, admin: Admin = Depends(get_current_admin), db: 
     online = livecache.snapshot()["online"]
     names = await _admin_names(db)
     live = await _live_by_user(db)
-    return _to_out(user, online, names, live.get(user.username, 0))
+    return _to_out(user, online, names, live.get(user.username, 0), await _node_ctx(db))
 
 
 @router.put("/{user_id}", response_model=UserOut)
@@ -230,6 +289,8 @@ async def update_user(
         data["outbound"] = outbound.normalize(data["outbound"])
     if "l2tp_mode" in data:
         data["l2tp_mode"] = _norm_mode(data["l2tp_mode"])
+    if "node_id" in data:
+        await _validate_node(db, data["node_id"])
     changes: list[str] = []
     new_password = data.pop("password", None)
     if new_password:
@@ -252,7 +313,7 @@ async def update_user(
     await outbound.reconcile(db)  # apply outbound change to an already-online user
     online = livecache.snapshot()["online"]
     names = await _admin_names(db)
-    return _to_out(user, online, names)
+    return _to_out(user, online, names, 0, await _node_ctx(db))
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -280,7 +341,7 @@ async def reset_quota(user_id: int, admin: Admin = Depends(get_current_admin), d
     await chap_secrets.rewrite(db)
     online = livecache.snapshot()["online"]
     names = await _admin_names(db)
-    return _to_out(user, online, names)
+    return _to_out(user, online, names, 0, await _node_ctx(db))
 
 
 @router.post("/{user_id}/toggle", response_model=UserOut)
@@ -295,7 +356,7 @@ async def toggle_user(user_id: int, admin: Admin = Depends(get_current_admin), d
         await pppd.terminate_user(db, user.username)
     online = livecache.snapshot()["online"]
     names = await _admin_names(db)
-    return _to_out(user, online, names)
+    return _to_out(user, online, names, 0, await _node_ctx(db))
 
 
 @router.post("/bulk")

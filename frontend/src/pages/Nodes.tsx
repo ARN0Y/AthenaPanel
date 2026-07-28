@@ -74,6 +74,23 @@ function Engine({ label, ok, port }: { label: string; ok: boolean; port?: number
   );
 }
 
+/** One customer-facing address. Empty is not a gap — it means the node inherits
+ *  the panel-wide setting, which is how node 1 keeps working untouched. */
+function ProxyLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-baseline gap-1.5 truncate">
+      <span className="shrink-0 text-muted-foreground/70">{label}</span>
+      {value ? (
+        <span className="truncate">{value}</span>
+      ) : (
+        <span className="truncate italic text-muted-foreground/50" title="Falls back to the panel-wide setting">
+          panel default
+        </span>
+      )}
+    </div>
+  );
+}
+
 function Metric({
   label,
   value,
@@ -139,8 +156,8 @@ function NodeCard({
               )}
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[11px] text-muted-foreground">
-              <span className={cn(!node.address && "italic opacity-60")}>
-                {node.address || "no entry address"}
+              <span className={cn(!node.address && "italic opacity-60")} title="The node's own address — ours, never given to customers">
+                {node.address || "address not set"}
               </span>
               {node.hostname && <span className="opacity-50">·</span>}
               {node.hostname && <span>{node.hostname}</span>}
@@ -234,24 +251,30 @@ function NodeCard({
 
         {/* engines + host */}
         <div className="flex flex-wrap items-center justify-between gap-2 border-t bg-muted/30 px-4 py-2.5">
-          {node.is_local ? (
-            <span className="text-[11px] text-muted-foreground">
-              This panel server — it terminates users itself, so it has no agent.
-            </span>
-          ) : (
-            <div className="flex flex-wrap gap-1">
-              <Engine label="L2TP" ok={node.xl2tpd_ok} port={node.l2tp_port} />
-              <Engine label="IPsec" ok={node.ipsec_ok} />
-              <Engine label="SSTP" ok={node.accel_ppp_ok} port={node.sstp_port} />
-              <Engine label="WG" ok={node.wireguard_ok} port={node.wg_port} />
-            </div>
-          )}
-          {!node.is_local && node.mem_total_bytes > 0 && (
+          <div className="flex flex-wrap gap-1">
+            <Engine label="L2TP" ok={node.xl2tpd_ok} port={node.l2tp_port} />
+            <Engine label="IPsec" ok={node.ipsec_ok} />
+            <Engine label="SSTP" ok={node.accel_ppp_ok} port={node.sstp_port} />
+            <Engine label="WG" ok={node.wireguard_ok} port={node.wg_port} />
+          </div>
+          {node.mem_total_bytes > 0 && (
             <span className="font-mono text-[10px] text-muted-foreground">
               load {node.load1.toFixed(2)} ·{" "}
               {formatBytes(node.mem_total_bytes - node.mem_available_bytes)}/{formatBytes(node.mem_total_bytes)}
             </span>
           )}
+        </div>
+
+        <div className="border-t px-4 py-2.5">
+          <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+            external proxy — what customers dial
+          </div>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 font-mono text-[11px]">
+            <ProxyLine label="L2TP" value={node.ext_l2tp_address} />
+            <ProxyLine label="raw" value={node.ext_l2tp_raw_address} />
+            <ProxyLine label="SSTP" value={node.ext_sstp_address} />
+            <ProxyLine label="WG" value={node.ext_wg_endpoint} />
+          </div>
         </div>
 
         {node.note && (
@@ -403,15 +426,14 @@ function CreateNodeDialog({
             </div>
 
             <div className="sm:col-span-2">
-              <Label htmlFor="nd-addr">Entry address <span className="text-muted-foreground">(optional)</span></Label>
+              <Label htmlFor="nd-addr">Node address <span className="text-muted-foreground">(optional)</span></Label>
               <Input
                 id="nd-addr" value={address} onChange={(e) => setAddress(e.target.value)}
-                placeholder="88.218.18.91"
+                placeholder="91.98.237.167"
               />
               <p className="mt-1 text-[11px] text-muted-foreground">
-                What clients are pointed at — a relay IP, not necessarily the node itself. Kept
-                separate from where the agent dials, so a burned address is one edit here and the
-                node never changes. Leave empty now and set it once the node is up.
+                The server itself, for your reference. Customers never reach it directly — they
+                dial the relay in front of it, which is configured after the node is up.
               </p>
             </div>
 
@@ -506,11 +528,17 @@ function EditNodeDialog({
   const [wgPort, setWgPort] = React.useState(51820);
   const [sstpPort, setSstpPort] = React.useState(443);
   const [l2tpPort, setL2tpPort] = React.useState(1701);
+  const [extL2tp, setExtL2tp] = React.useState("");
+  const [extRaw, setExtRaw] = React.useState("");
+  const [extSstp, setExtSstp] = React.useState("");
+  const [extWg, setExtWg] = React.useState("");
 
   React.useEffect(() => {
     if (!node) return;
     setName(node.name); setAddress(node.address); setNote(node.note);
     setWgPort(node.wg_port); setSstpPort(node.sstp_port); setL2tpPort(node.l2tp_port);
+    setExtL2tp(node.ext_l2tp_address); setExtRaw(node.ext_l2tp_raw_address);
+    setExtSstp(node.ext_sstp_address); setExtWg(node.ext_wg_endpoint);
   }, [node]);
 
   const mut = useMutation({
@@ -518,6 +546,8 @@ function EditNodeDialog({
       api.updateNode(node!.id, {
         name: name.trim(), address: address.trim(), note: note.trim(),
         wg_port: wgPort, sstp_port: sstpPort, l2tp_port: l2tpPort,
+        ext_l2tp_address: extL2tp.trim(), ext_l2tp_raw_address: extRaw.trim(),
+        ext_sstp_address: extSstp.trim(), ext_wg_endpoint: extWg.trim(),
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["nodes"] });
@@ -529,39 +559,79 @@ function EditNodeDialog({
 
   return (
     <Dialog open={!!node} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-h-[88vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Edit {node?.name}</DialogTitle>
           <DialogDescription>
-            Changing the entry address takes effect for configs generated from now on. The node
-            itself is untouched, which is the point — a burned address costs one edit.
+            External proxy changes apply to profiles generated from now on. Sessions already
+            connected are untouched.
           </DialogDescription>
         </DialogHeader>
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div>
-            <Label htmlFor="e-name">Name</Label>
-            <Input id="e-name" value={name} onChange={(e) => setName(e.target.value)} />
-          </div>
-          <div>
-            <Label htmlFor="e-addr">Entry address</Label>
-            <Input id="e-addr" value={address} onChange={(e) => setAddress(e.target.value)} placeholder="88.218.18.91" />
-          </div>
-          <div className="sm:col-span-2">
-            <Label htmlFor="e-note">Note</Label>
-            <Input id="e-note" value={note} onChange={(e) => setNote(e.target.value)} />
-          </div>
-          <div className="grid grid-cols-3 gap-3 sm:col-span-2">
+        <div className="space-y-5">
+          <div className="grid gap-4 sm:grid-cols-2">
             <div>
-              <Label htmlFor="e-wg" className="text-xs">WireGuard port</Label>
-              <Input id="e-wg" type="number" value={wgPort} onChange={(e) => setWgPort(+e.target.value)} />
+              <Label htmlFor="e-name">Name</Label>
+              <Input id="e-name" value={name} onChange={(e) => setName(e.target.value)} />
             </div>
             <div>
-              <Label htmlFor="e-sstp" className="text-xs">SSTP port</Label>
-              <Input id="e-sstp" type="number" value={sstpPort} onChange={(e) => setSstpPort(+e.target.value)} />
+              <Label htmlFor="e-addr">Node address</Label>
+              <Input id="e-addr" value={address} onChange={(e) => setAddress(e.target.value)} placeholder="91.98.237.167" />
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                The server itself. Ours, never handed to a customer.
+              </p>
             </div>
-            <div>
-              <Label htmlFor="e-l2tp" className="text-xs">L2TP port</Label>
-              <Input id="e-l2tp" type="number" value={l2tpPort} onChange={(e) => setL2tpPort(+e.target.value)} />
+            <div className="sm:col-span-2">
+              <Label htmlFor="e-note">Note</Label>
+              <Input id="e-note" value={note} onChange={(e) => setNote(e.target.value)} />
+            </div>
+          </div>
+
+          <div className="rounded-md border p-3">
+            <div className="mb-1 text-sm font-medium">External proxy</div>
+            <p className="mb-3 text-[11px] text-muted-foreground">
+              What customers actually dial: the relay in front of this node, not the node itself.
+              Per protocol, because raw L2TP needs its own entry — IPsec is negotiated before the
+              user is known, so the two modes cannot share an address. An empty field inherits the
+              panel-wide setting.
+            </p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <Label htmlFor="e-ext-l2tp" className="text-xs">L2TP / IPsec</Label>
+                <Input id="e-ext-l2tp" value={extL2tp} onChange={(e) => setExtL2tp(e.target.value)} placeholder="lttp.topmeli.com" />
+              </div>
+              <div>
+                <Label htmlFor="e-ext-raw" className="text-xs">L2TP raw (no IPsec)</Label>
+                <Input id="e-ext-raw" value={extRaw} onChange={(e) => setExtRaw(e.target.value)} placeholder="lttpraw.topmeli.com" />
+              </div>
+              <div>
+                <Label htmlFor="e-ext-sstp" className="text-xs">SSTP</Label>
+                <Input id="e-ext-sstp" value={extSstp} onChange={(e) => setExtSstp(e.target.value)} placeholder="sstp.topmeli.com" />
+              </div>
+              <div>
+                <Label htmlFor="e-ext-wg" className="text-xs">WireGuard</Label>
+                <Input id="e-ext-wg" value={extWg} onChange={(e) => setExtWg(e.target.value)} placeholder="wg.topmeli.com:51820" />
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-md border p-3">
+            <div className="mb-1 text-sm font-medium">Service ports on the node</div>
+            <p className="mb-3 text-[11px] text-muted-foreground">
+              What the node itself listens on. A port blocked in one country is fine in another.
+            </p>
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <Label htmlFor="e-wg" className="text-xs">WireGuard</Label>
+                <Input id="e-wg" type="number" value={wgPort} onChange={(e) => setWgPort(+e.target.value)} />
+              </div>
+              <div>
+                <Label htmlFor="e-sstp" className="text-xs">SSTP</Label>
+                <Input id="e-sstp" type="number" value={sstpPort} onChange={(e) => setSstpPort(+e.target.value)} />
+              </div>
+              <div>
+                <Label htmlFor="e-l2tp" className="text-xs">L2TP</Label>
+                <Input id="e-l2tp" type="number" value={l2tpPort} onChange={(e) => setL2tpPort(+e.target.value)} />
+              </div>
             </div>
           </div>
         </div>

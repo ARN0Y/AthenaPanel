@@ -14,6 +14,7 @@ import {
   Plus,
   RotateCcw,
   Search,
+  Server,
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -419,6 +420,15 @@ export function Users() {
                       {u.outbound === "warp" && (
                         <span className="inline-flex items-center gap-1 rounded bg-orange-500/10 px-1.5 py-0.5 text-[10px] font-medium text-orange-400">
                           <Cloud className="h-3 w-3" /> WARP
+                        </span>
+                      )}
+                      {/* Only worth the pixels once more than one node exists. */}
+                      {isSuperadmin && u.node_id !== 1 && (
+                        <span
+                          className="inline-flex items-center gap-1 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary"
+                          title={`Terminated by node ${u.node_name}`}
+                        >
+                          <Server className="h-3 w-3" /> {u.node_name}
                         </span>
                       )}
                     </div>

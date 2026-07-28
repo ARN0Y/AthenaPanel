@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import accel
 from .config import settings
-from .models import User
+from .models import LOCAL_NODE_ID, User
 
 _lock = asyncio.Lock()
 
@@ -46,9 +46,20 @@ def render(users: list[User]) -> str:
     return "".join(lines)
 
 
-async def rewrite(db: AsyncSession) -> None:
-    """Atomically rewrite chap-secrets from the DB."""
-    result = await db.execute(select(User).order_by(User.username))
+async def rewrite(db: AsyncSession, node_id: int = LOCAL_NODE_ID) -> None:
+    """Atomically rewrite this node's chap-secrets from the DB.
+
+    Scoped to one node: a user authenticates on the node they are assigned to,
+    so writing the whole account list onto every node would let anyone connect
+    anywhere regardless of their assignment, and would spread every credential
+    across every machine for no benefit.
+
+    The default is the local node, which keeps the panel server behaving exactly
+    as before — all pre-existing accounts are assigned to it.
+    """
+    result = await db.execute(
+        select(User).where(User.node_id == node_id).order_by(User.username)
+    )
     users = list(result.scalars().all())
     content = render(users)
 

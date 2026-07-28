@@ -116,6 +116,10 @@ def _summarise(node: Node, sessions: int) -> NodeOut:
         wg_port=node.wg_port,
         sstp_port=node.sstp_port,
         l2tp_port=node.l2tp_port,
+        ext_l2tp_address=node.ext_l2tp_address or "",
+        ext_l2tp_raw_address=node.ext_l2tp_raw_address or "",
+        ext_sstp_address=node.ext_sstp_address or "",
+        ext_wg_endpoint=node.ext_wg_endpoint or "",
     )
 
 
@@ -246,6 +250,14 @@ async def update_node(
             if not 1 <= value <= 65535:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{field} must be 1-65535")
             setattr(node, field, value)
+            changed.append(field)
+    # External proxy. Empty is meaningful — it means "inherit the panel-wide
+    # setting" — so an empty string is stored rather than ignored.
+    for field in ("ext_l2tp_address", "ext_l2tp_raw_address",
+                  "ext_sstp_address", "ext_wg_endpoint"):
+        value = getattr(payload, field)
+        if value is not None:
+            setattr(node, field, value.strip())
             changed.append(field)
 
     await audit.record(db, "update_node", node.name, ", ".join(changed) or "no change", actor=admin.username)
