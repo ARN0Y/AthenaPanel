@@ -363,6 +363,25 @@ func (l *Ledger) SessionCount(username string) int {
 	return 0
 }
 
+// Owners maps each live interface to the account it belongs to.
+//
+// The kernel knows an interface's counters but not whose it is; that pairing
+// only exists because the ip-up hook told us. Without it the master receives
+// traffic it cannot attribute, and a session shows up in the panel with no name
+// against it. An interface missing from this map predates the agent, and is
+// reported nameless rather than guessed at.
+func (l *Ledger) Owners() map[string]string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make(map[string]string, len(l.users))
+	for name, u := range l.users {
+		for ifname := range u.sessions {
+			out[ifname] = name
+		}
+	}
+	return out
+}
+
 // Users lists everyone currently tracked.
 func (l *Ledger) Users() []string {
 	l.mu.Lock()

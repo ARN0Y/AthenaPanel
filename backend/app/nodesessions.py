@@ -101,7 +101,17 @@ async def apply_report(
                 )
             )
             await _note_new_session(db, username, now)
-            log.info("node %d: session %s/%s started", node_id, username or "?", ifname)
+            if username:
+                log.info("node %d: session %s/%s started", node_id, username, ifname)
+            else:
+                # The node could not say whose it is — the session predates its
+                # agent, so no ip-up hook ever ran for it. The row is kept
+                # anyway: its traffic is real and losing it is worse than not
+                # knowing who to bill, and this is the only line that says so.
+                log.warning(
+                    "node %d: %s has no owner (session predates the agent); "
+                    "tracked but unattributed", node_id, ifname,
+                )
             continue
 
         # Interface numbers are recycled. If ppp0 comes back with a counter

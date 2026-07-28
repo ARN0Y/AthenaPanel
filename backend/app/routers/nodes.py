@@ -109,17 +109,29 @@ def _summarise(node: Node, counts: tuple[int, int]) -> NodeOut:
     breakdown of that total, so both come from one place: reading the total from
     the table and the breakdown from the last report let them disagree on screen
     whenever one moved before the other, which reads as a broken panel rather
-    than as the sampling gap it is. The report is left with what only it knows —
-    host stats and which engines are running.
+    than as the sampling gap it is.
+
+    WireGuard on a REMOTE node is the exception, and it has to be. The panel
+    provisions WireGuard itself, so every peer it knows about is on this
+    machine; a peer on another node was put there by something else and cannot
+    be attributed to an account, which is why it is counted from that node's
+    report and never turned into a session. Showing zero instead would claim the
+    node is idle when it is carrying traffic.
     """
     host: dict = {}
+    report: dict = {}
     if node.is_local:
         host = _local_host()
     elif node.last_report:
         try:
-            host = (json.loads(node.last_report) or {}).get("host") or {}
+            report = json.loads(node.last_report) or {}
+            host = report.get("host") or {}
         except ValueError:
-            host = {}
+            report = {}
+
+    ppp_count, wg_count = counts
+    if not node.is_local:
+        wg_count = len(report.get("wg") or [])
 
     online = False
     seen_seconds: int | None = None
@@ -148,9 +160,9 @@ def _summarise(node: Node, counts: tuple[int, int]) -> NodeOut:
         kernel=node.kernel,
         online=online,
         last_seen_seconds=seen_seconds,
-        sessions=counts[0] + counts[1],
-        ppp_count=counts[0],
-        wg_count=counts[1],
+        sessions=ppp_count + wg_count,
+        ppp_count=ppp_count,
+        wg_count=wg_count,
         uptime_seconds=int(host.get("uptime_seconds") or 0),
         load1=float(host.get("load1") or 0.0),
         mem_total_bytes=int(host.get("mem_total_bytes") or 0),

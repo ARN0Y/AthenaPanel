@@ -273,7 +273,7 @@ func runSession(ctx context.Context, cfg config, engine *creditEngine) error {
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	if err := sendReport(send, cfg); err != nil {
+	if err := sendReport(send, cfg, engine); err != nil {
 		return err
 	}
 	for {
@@ -287,14 +287,14 @@ func runSession(ctx context.Context, cfg config, engine *creditEngine) error {
 			}
 			return fmt.Errorf("recv: %w", err)
 		case <-ticker.C:
-			if err := sendReport(send, cfg); err != nil {
+			if err := sendReport(send, cfg, engine); err != nil {
 				return err
 			}
 		}
 	}
 }
 
-func sendReport(send func(*pb.AgentMessage) error, cfg config) error {
+func sendReport(send func(*pb.AgentMessage) error, cfg config, engine *creditEngine) error {
 	host := collect.Health(cfg.wgIface)
 	rep := &pb.Report{
 		SentAtUnixMs: time.Now().UnixMilli(),
@@ -315,13 +315,18 @@ func sendReport(send func(*pb.AgentMessage) error, cfg config) error {
 	ppp, scanOK := collect.PppInterfaces()
 	rep.PppScanFailed = !scanOK
 	if scanOK {
+		// Who owns each interface comes from the ledger, which learned it from
+		// the ip-up hook. The kernel cannot tell us, and without it the master
+		// receives bytes it cannot attribute to an account.
+		owners := engine.led.Owners()
 		for _, p := range ppp {
 			rep.Ppp = append(rep.Ppp, &pb.PppSession{
-				Ifname:  p.Ifname,
-				RxBytes: p.RxBytes,
-				TxBytes: p.TxBytes,
-				PeerIp:  p.PeerIP,
-				Pid:     p.Pid,
+				Ifname:   p.Ifname,
+				RxBytes:  p.RxBytes,
+				TxBytes:  p.TxBytes,
+				PeerIp:   p.PeerIP,
+				Pid:      p.Pid,
+				Username: owners[p.Ifname],
 			})
 		}
 	} else {
