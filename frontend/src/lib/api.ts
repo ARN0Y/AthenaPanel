@@ -303,6 +303,49 @@ export interface BackupList {
 export type BulkActionType = "enable" | "disable" | "delete" | "reset-quota";
 
 // ---- Endpoints ----
+export interface NodeInfo {
+  id: number;
+  name: string;
+  is_local: boolean;
+  enabled: boolean;
+  address: string;
+  note: string;
+  agent_version: string;
+  hostname: string;
+  kernel: string;
+  online: boolean;
+  last_seen_seconds: number | null;
+  sessions: number;
+  ppp_count: number;
+  wg_count: number;
+  uptime_seconds: number;
+  load1: number;
+  mem_total_bytes: number;
+  mem_available_bytes: number;
+  xl2tpd_ok: boolean;
+  ipsec_ok: boolean;
+  accel_ppp_ok: boolean;
+  wireguard_ok: boolean;
+}
+
+/** Returned once, on registration or rotation. The panel keeps no copy of the
+ *  key, so this is the only chance to save it. */
+export interface NodeCredentials {
+  id: number;
+  name: string;
+  token: string;
+  client_cert: string;
+  client_key: string;
+  ca_cert: string;
+}
+
+export interface NodePayload {
+  name?: string;
+  address?: string;
+  note?: string;
+  enabled?: boolean;
+}
+
 export const api = {
   login: (username: string, password: string) =>
     request<{ access_token: string; expires_in: number; username: string; role: string }>(
@@ -398,4 +441,13 @@ export const api = {
     a.remove();
     URL.revokeObjectURL(url);
   },
+
+  listNodes: () => request<NodeInfo[]>("/api/nodes"),
+  createNode: (p: NodePayload) =>
+    request<NodeCredentials>("/api/nodes", { method: "POST", body: JSON.stringify(p) }),
+  updateNode: (id: number, p: NodePayload) =>
+    request<NodeInfo>(`/api/nodes/${id}`, { method: "PATCH", body: JSON.stringify(p) }),
+  rotateNode: (id: number) =>
+    request<NodeCredentials>(`/api/nodes/${id}/rotate`, { method: "POST" }),
+  deleteNode: (id: number) => request<void>(`/api/nodes/${id}`, { method: "DELETE" }),
 };

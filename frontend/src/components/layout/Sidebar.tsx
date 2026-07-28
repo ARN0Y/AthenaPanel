@@ -6,6 +6,7 @@ import {
   Radio,
   ScrollText,
   Settings,
+  Server,
   Shield,
   Users,
   type LucideIcon,
@@ -31,6 +32,9 @@ export const NAV_ITEMS: NavItemDef[] = [
   // write API is superadmin-only — a reseller gets the values they need for
   // customer profiles through /api/settings, not this page.
   { to: "/settings", label: "Settings", icon: Settings, super: true },
+  // Nodes carry every user's credentials and can disconnect them, so managing
+  // them is superadmin-only just like Admins.
+  { to: "/nodes", label: "Nodes", icon: Server, super: true },
   { to: "/admins", label: "Admins", icon: Shield, super: true },
   { to: "/audit", label: "Audit Log", icon: ClipboardList, super: true },
 ];

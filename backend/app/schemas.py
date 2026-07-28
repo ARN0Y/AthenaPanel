@@ -310,3 +310,58 @@ class SessionDownIn(BaseModel):
     in_octets: int = 0
     out_octets: int = 0
     session_time: int = 0
+
+
+# --- nodes -----------------------------------------------------------------
+
+class NodeCreate(BaseModel):
+    name: str
+    # What clients are pointed at for this node. Kept separate from wherever
+    # the agent dials the hub from: an entry address gets burned and swapped
+    # without the node itself changing.
+    address: str = ""
+    note: str = ""
+
+
+class NodeUpdate(BaseModel):
+    name: str | None = None
+    address: str | None = None
+    note: str | None = None
+    enabled: bool | None = None
+
+
+class NodeCreated(BaseModel):
+    """Returned once, at registration or rotation. The panel keeps no copy of
+    the key — only the CA — so this is the only chance to save it."""
+
+    id: int
+    name: str
+    token: str
+    client_cert: str
+    client_key: str
+    ca_cert: str
+
+
+class NodeOut(BaseModel):
+    id: int
+    name: str
+    is_local: bool
+    enabled: bool
+    address: str
+    note: str
+    agent_version: str
+    hostname: str
+    kernel: str
+    online: bool
+    last_seen_seconds: int | None = None
+    sessions: int = 0
+    ppp_count: int = 0
+    wg_count: int = 0
+    uptime_seconds: int = 0
+    load1: float = 0.0
+    mem_total_bytes: int = 0
+    mem_available_bytes: int = 0
+    xl2tpd_ok: bool = False
+    ipsec_ok: bool = False
+    accel_ppp_ok: bool = False
+    wireguard_ok: bool = False

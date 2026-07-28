@@ -8,6 +8,7 @@ import { Dashboard } from "@/pages/Dashboard";
 import { Events } from "@/pages/Events";
 import { InviteAccept } from "@/pages/InviteAccept";
 import { Login } from "@/pages/Login";
+import { Nodes } from "@/pages/Nodes";
 import { Sessions } from "@/pages/Sessions";
 import { Settings } from "@/pages/Settings";
 import { UserDetail } from "@/pages/UserDetail";
@@ -26,6 +27,7 @@ export default function App() {
           <Route path="/sessions" element={<Sessions />} />
           <Route path="/events" element={<Events />} />
           <Route element={<SuperadminRoute />}>
+            <Route path="/nodes" element={<Nodes />} />
             <Route path="/admins" element={<Admins />} />
             <Route path="/audit" element={<Audit />} />
             <Route path="/settings" element={<Settings />} />

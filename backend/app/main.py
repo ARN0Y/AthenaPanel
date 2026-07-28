@@ -19,6 +19,7 @@ from .routers import (
     backups as backups_router,
     events,
     internal,
+    nodes as nodes_router,
     sessions,
     settings as settings_router,
     stats,
@@ -190,6 +191,7 @@ for r in (
     backups_router.router,
     wireguard_router.router,
     sub_router.router,
+    nodes_router.router,
     internal.router,
 ):
     app.include_router(r)
