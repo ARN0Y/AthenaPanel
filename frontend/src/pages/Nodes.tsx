@@ -226,14 +226,20 @@ function NodeCard({
         </div>
 
         {/* counters */}
-        <div className="grid grid-cols-4 gap-3 border-t px-4 py-3">
-          <Metric label="sessions" value={node.sessions} />
+        <div className="grid grid-cols-3 gap-3 border-t px-4 py-3">
+          {/* One number, one breakdown. They used to be two metrics reading two
+              different sources, which meant the card could show "4 sessions"
+              next to "0 tunnels" and look broken. */}
           <Metric
-            label="tunnels"
-            value={node.ppp_count + node.wg_count}
-            sub={`${node.ppp_count} ppp · ${node.wg_count} wg`}
+            label="sessions"
+            value={node.sessions}
+            sub={node.wg_count > 0 ? `${node.ppp_count} ppp · ${node.wg_count} wg` : undefined}
           />
-          <Metric label="transferred" value={formatBytes(total)} sub={`↓${formatBytes(node.tx_total_bytes)}`} />
+          <Metric
+            label="transferred"
+            value={formatBytes(total)}
+            sub={`↓${formatBytes(node.tx_total_bytes)} · ↑${formatBytes(node.rx_total_bytes)}`}
+          />
           <Metric
             label={node.is_local ? "uptime" : node.online ? "uptime" : "last seen"}
             value={

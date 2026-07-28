@@ -51,24 +51,34 @@ def _local_address() -> str:
         return ""
 
 
-def _local_snapshot() -> tuple[dict, dict]:
-    """Stand in for the report node 1 never sends.
+def _live_counts() -> dict[int, tuple[int, int]]:
+    """(ppp, wireguard) session counts per node, from the shared live snapshot.
+
+    One source for the Nodes page and the Sessions page, so the two can never
+    show different numbers for the same machine. It also means a node that has
+    gone quiet reports zero rather than its last known figure: its rows are
+    HELD, not closed, but nobody can currently say those sessions are up, and
+    the card already says the node is offline.
+
+    Counting from the sessions table instead would drift by up to one poll
+    against what the operator sees on the Sessions page — and a panel that
+    contradicts itself is read as broken, however defensible each number is.
+    """
+    counts: dict[int, list[int]] = {}
+    for s in livecache.snapshot().get("sessions") or []:
+        node_id = getattr(s, "node_id", LOCAL_NODE_ID)
+        slot = counts.setdefault(node_id, [0, 0])
+        slot[1 if s.protocol == "WireGuard" else 0] += 1
+    return {nid: (c[0], c[1]) for nid, c in counts.items()}
+
+
+def _local_host() -> dict:
+    """Host stats for the report node 1 never sends.
 
     The panel server is node 1, and it has no agent — it reads its own kernel
-    directly. Without this its card would show zero tunnels and no host stats,
-    which is not "we don't know", it is "we know and threw it away". Shaped like
-    a report so the rest of the summariser does not care where it came from.
+    directly. Without this its card would show no host stats, which is not "we
+    don't know", it is "we know and threw it away".
     """
-    # "sessions", not "online": the latter is a set of usernames, and asking a
-    # string for its .protocol quietly filed every WireGuard peer under ppp.
-    # Scoped to node 1 as well — the snapshot now carries every node's sessions,
-    # so an unscoped count would credit this card with other machines' tunnels.
-    live = [
-        s for s in (livecache.snapshot().get("sessions") or [])
-        if getattr(s, "node_id", LOCAL_NODE_ID) == LOCAL_NODE_ID
-    ]
-    ppp = [s for s in live if s.protocol != "WireGuard"]
-    wg = [s for s in live if s.protocol == "WireGuard"]
     try:
         sysinfo = sysmon.collect()
         host = {
@@ -88,21 +98,28 @@ def _local_snapshot() -> tuple[dict, dict]:
         "accel_ppp_ok": _port_bound(443),
         "wireguard_ok": wireguard.iface_up(),
     })
-    return {"ppp": ppp, "wg": wg}, host
+    return host
 
 
-def _summarise(node: Node, sessions: int) -> NodeOut:
-    """Flatten a node plus its newest report into something the UI can render."""
-    report: dict = {}
+def _summarise(node: Node, counts: tuple[int, int]) -> NodeOut:
+    """Flatten a node plus its newest report into something the UI can render.
+
+    `counts` is (ppp, wireguard) from the live snapshot — the same numbers the
+    Sessions page is showing right now. The card displays a total and a
+    breakdown of that total, so both come from one place: reading the total from
+    the table and the breakdown from the last report let them disagree on screen
+    whenever one moved before the other, which reads as a broken panel rather
+    than as the sampling gap it is. The report is left with what only it knows —
+    host stats and which engines are running.
+    """
     host: dict = {}
     if node.is_local:
-        report, host = _local_snapshot()
+        host = _local_host()
     elif node.last_report:
         try:
-            report = json.loads(node.last_report)
-            host = report.get("host") or {}
+            host = (json.loads(node.last_report) or {}).get("host") or {}
         except ValueError:
-            report = {}
+            host = {}
 
     online = False
     seen_seconds: int | None = None
@@ -131,9 +148,9 @@ def _summarise(node: Node, sessions: int) -> NodeOut:
         kernel=node.kernel,
         online=online,
         last_seen_seconds=seen_seconds,
-        sessions=sessions,
-        ppp_count=len(report.get("ppp") or []),
-        wg_count=len(report.get("wg") or []),
+        sessions=counts[0] + counts[1],
+        ppp_count=counts[0],
+        wg_count=counts[1],
         uptime_seconds=int(host.get("uptime_seconds") or 0),
         load1=float(host.get("load1") or 0.0),
         mem_total_bytes=int(host.get("mem_total_bytes") or 0),
@@ -159,13 +176,6 @@ def _summarise(node: Node, sessions: int) -> NodeOut:
     )
 
 
-async def _session_counts(db: AsyncSession) -> dict[int, int]:
-    rows = await db.execute(
-        select(SessionRow.node_id, func.count(SessionRow.id)).group_by(SessionRow.node_id)
-    )
-    return {nid: cnt for nid, cnt in rows.all()}
-
-
 async def _get(db: AsyncSession, node_id: int) -> Node:
     node = (await db.execute(select(Node).where(Node.id == node_id))).scalar_one_or_none()
     if node is None:
@@ -175,9 +185,9 @@ async def _get(db: AsyncSession, node_id: int) -> Node:
 
 @router.get("", response_model=list[NodeOut])
 async def list_nodes(db: AsyncSession = Depends(get_session)):
-    counts = await _session_counts(db)
+    counts = _live_counts()
     rows = (await db.execute(select(Node).order_by(Node.id))).scalars().all()
-    return [_summarise(n, counts.get(n.id, 0)) for n in rows]
+    return [_summarise(n, counts.get(n.id, (0, 0))) for n in rows]
 
 
 @router.post("", response_model=NodeCreated, status_code=status.HTTP_201_CREATED)
@@ -298,8 +308,7 @@ async def update_node(
 
     await audit.record(db, "update_node", node.name, ", ".join(changed) or "no change", actor=admin.username)
     await db.commit()
-    counts = await _session_counts(db)
-    return _summarise(node, counts.get(node.id, 0))
+    return _summarise(node, _live_counts().get(node.id, (0, 0)))
 
 
 @router.delete("/{node_id}", status_code=status.HTTP_204_NO_CONTENT)

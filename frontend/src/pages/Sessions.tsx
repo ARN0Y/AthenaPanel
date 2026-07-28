@@ -268,7 +268,11 @@ export function Sessions() {
               <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
                 ref={searchRef}
-                placeholder="Search user, protocol, IP or interface…"
+                placeholder={
+                  multiNode
+                    ? "Search user, node, protocol, IP or interface…"
+                    : "Search user, protocol, IP or interface…"
+                }
                 className="pl-9 pr-9"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
