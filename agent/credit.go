@@ -183,6 +183,12 @@ func (e *creditEngine) runCredit(stop <-chan struct{}) {
 					log.Printf("  disconnect %s: %v (%d killed)", v.Username, err, n)
 				}
 				_ = enforce.DisconnectAccel(v.Username)
+				// Forget them, or every tick would re-decide the same thing and
+				// re-kill a process that is already gone — a second of log spam
+				// per second, and real work for nothing. If they reconnect the
+				// ip-up hook registers them again from scratch, which is also
+				// what makes the next grant start from a clean baseline.
+				e.led.Forget(v.Username)
 
 			case ledger.RequestMore:
 				if send == nil {
