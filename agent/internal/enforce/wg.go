@@ -3,8 +3,11 @@ package enforce
 import (
 	"encoding/base64"
 	"fmt"
+	"log"
 	"net"
 	"os"
+	"os/exec"
+	"strings"
 
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -102,7 +105,29 @@ func SyncWgPeers(iface string, peers []WgPeer) (applied int, err error) {
 	}); err != nil {
 		return 0, fmt.Errorf("configure %s: %w", iface, err)
 	}
+
+	// wg-quick installs a route for every AllowedIP; configuring a peer over
+	// netlink does NOT. Without one the kernel sends the reply to a peer's
+	// address out of the DEFAULT route instead of into the tunnel, so the
+	// handshake completes, `wg show` looks perfect, and not a single byte of
+	// customer traffic ever arrives. Adding it here means the node is correct
+	// even if its interface was addressed outside the panel's pool.
+	for _, p := range peers {
+		if ipnet, err := allowedIP(p.Address); err == nil {
+			ensureRoute(ipnet.IP.String(), iface)
+		}
+	}
 	return applied, nil
+}
+
+// ensureRoute makes <addr>/32 reachable through the tunnel. Idempotent: `route
+// replace` creates it or leaves it correct, so this can run on every sync.
+func ensureRoute(addr, iface string) {
+	cmd := exec.Command("ip", "route", "replace", addr+"/32", "dev", iface)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		log.Printf("wireguard: could not route %s via %s: %v %s",
+			addr, iface, err, strings.TrimSpace(string(out)))
+	}
 }
 
 // RemoveWgPeer revokes one key. Used when a user's credit runs out, since the

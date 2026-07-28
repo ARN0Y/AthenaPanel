@@ -103,6 +103,53 @@ function ProxyLine({ label, value, isLocal }: { label: string; value: string; is
   );
 }
 
+/** Port of a `host:port` external proxy, or null when none was given. */
+function proxyPort(value: string): number | null {
+  const m = /:(\d+)\s*$/.exec(value || "");
+  return m ? Number(m[1]) : null;
+}
+
+/** What the relay in front of a node has to forward, derived from what the node
+ *  reported and what the operator typed.
+ *
+ *  This exists because the two ports do NOT have to match and often must not —
+ *  a relay's public port is frequently already taken by something else, so the
+ *  customer dials one number and the node listens on another. Working that out
+ *  by hand is how a customer ends up handshaking against the wrong service on
+ *  the far side, which looks exactly like "WireGuard is broken". */
+function ForwardHint({ node }: { node: NodeInfo }) {
+  const rows = [
+    { label: "WireGuard", ext: node.ext_wg_endpoint, port: node.wg_port, proto: "udp" },
+    { label: "SSTP", ext: node.ext_sstp_address, port: node.sstp_port, proto: "tcp" },
+    { label: "L2TP", ext: node.ext_l2tp_address, port: node.l2tp_port, proto: "udp" },
+  ].filter((r) => r.ext);
+  if (!rows.length) return null;
+
+  return (
+    <div className="mt-2 border-t pt-2">
+      <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+        forward on the relay → this node
+      </div>
+      <div className="space-y-0.5 font-mono text-[10px]">
+        {rows.map((r) => {
+          const pub = proxyPort(r.ext) ?? r.port;
+          return (
+            <div key={r.label} className="flex items-baseline gap-1.5 truncate">
+              <span className="shrink-0 text-muted-foreground/70">{r.proto}</span>
+              <span className="truncate">
+                {pub} <span className="text-muted-foreground/60">→</span> {node.address || "node"}:{r.port}
+              </span>
+              {pub !== r.port && (
+                <span className="shrink-0 text-[9px] text-muted-foreground/60">(differs)</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function Metric({
   label,
   value,
@@ -293,6 +340,7 @@ function NodeCard({
             <ProxyLine label="SSTP" value={node.ext_sstp_address} isLocal={node.is_local} />
             <ProxyLine label="WG" value={node.ext_wg_endpoint} isLocal={node.is_local} />
           </div>
+          {!node.is_local && <ForwardHint node={node} />}
         </div>
 
         {node.note && (

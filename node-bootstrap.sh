@@ -101,7 +101,15 @@ chmod 0755 /etc/ppp/ip-up.d/athena /etc/ppp/ip-down.d/athena
 
 WG_IFACE="${WG_IFACE:-wg-panel}"
 WG_PORT="${WG_PORT:-51820}"
-WG_ADDR="${WG_ADDR:-10.66.66.1/24}"
+# The interface address MUST be the gateway of the pool the panel allocates peer
+# addresses from (backend config `wg_pool`, default 10.10.0.0/16). Not a
+# stylistic choice: the peer's address is what the node has to route and NAT, and
+# a peer outside the interface's subnet gets neither. Configuring the peer over
+# netlink does not create a route the way wg-quick does, so the connected route
+# from THIS address is what makes the tunnel carry traffic at all. Get it wrong
+# and the handshake still completes, which is exactly what makes it hard to spot.
+WG_ADDR="${WG_ADDR:-10.10.0.1/16}"
+WG_POOL="${WG_POOL:-10.10.0.0/16}"
 if [ "$WANT_WG" = 1 ]; then
     log "wireguard interface $WG_IFACE"
     # PEERS ARE NOT WRITTEN HERE. The interface is infrastructure and belongs to
@@ -147,7 +155,11 @@ fi
 log "egress NAT"
 WAN=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'dev \K\S+' | head -1)
 [ -n "$WAN" ] || die "could not determine the WAN interface"
-for net in 192.168.0.0/16 10.66.0.0/16; do
+# 192.168/16 covers the ppp pools (L2TP .42, raw .45, SSTP .44); WG_POOL is where
+# the panel allocates WireGuard peers. A pool that is not masqueraded here means
+# customers hand-shake successfully and then reach nothing, which reads as "the
+# VPN is broken" with no error anywhere to explain it.
+for net in 192.168.0.0/16 "$WG_POOL"; do
     iptables -t nat -C POSTROUTING -s "$net" -o "$WAN" -j MASQUERADE 2>/dev/null \
         || iptables -t nat -A POSTROUTING -s "$net" -o "$WAN" -j MASQUERADE
 done
