@@ -45,7 +45,8 @@ class NodeHubServicer(object):
     """Missing associated documentation comment in .proto file."""
 
     def Connect(self, request_iterator, context):
-        """Opened once by the agent and held open. Reports flow up, commands down.
+        """Opened once by the agent and held open. Reports and credit requests flow
+        up, grants and commands flow down.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')

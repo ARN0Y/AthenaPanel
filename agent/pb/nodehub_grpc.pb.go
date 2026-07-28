@@ -6,7 +6,9 @@
 
 // Control-plane contract between the panel (hub) and a termination node.
 //
-// Two rules this file exists to enforce, both learned before it was written:
+// ============================================================================
+// THE FOUR RULES THIS FILE EXISTS TO ENFORCE
+// ============================================================================
 //
 //  1. THE NODE DIALS OUT. The hub never connects to a node. A node may sit
 //     behind NAT, change address, or have its IP burned and replaced; none of
@@ -17,13 +19,67 @@
 //     watermark and computes the difference itself. A resent report is then a
 //     no-op instead of double-counting, and a dropped one heals on the next
 //     report instead of losing traffic forever. This is the single most
-//     important property of the protocol -- deltas over an unreliable link
+//     important property of the protocol — deltas over an unreliable link
 //     silently corrupt billing.
 //
-// The stream is bidirectional from day one even though the hub only replies
-// with acks today: Phase 2 adds commands (disconnect, sync users, quota
-// credit) as new variants of HubMessage.payload, which old agents ignore and
-// new ones handle. Fields are only ever added, never renumbered or reused.
+//  3. QUOTA IS ENFORCED ON THE NODE, NOT BY THE HUB. Asking the hub before
+//     every byte is impossible; polling the hub every 30s means a user on a
+//     100 Mbps line overshoots by ~375 MB. The hub instead GRANTS a bounded
+//     amount of traffic and the node counts it down locally, at a resolution
+//     it chooses. Overshoot then equals (local poll interval x line rate),
+//     which at 1s and a rate-limited user is single-digit megabytes.
+//
+//  4. THE GRANT IS ALSO THE FAILURE BUDGET. If the hub becomes unreachable, a
+//     node can serve at most the credit it already holds. There is no choice
+//     to make between "cut everyone off on a hiccup" and "lose unbounded
+//     traffic" — the grant size IS the risk, chosen deliberately per user.
+//
+// ============================================================================
+// CREDIT CONTROL
+// ============================================================================
+//
+// The credit mechanism is deliberately modelled on RFC 4006 (Diameter
+// Credit-Control), which is the standard telecoms answer to exactly this
+// problem: prepaid quota spent at distributed enforcement points that cannot
+// consult the authority per packet. The names below map onto it directly so
+// anyone who knows the RFC can read this without a translation table:
+//
+//   RFC 4006                      here
+//   ------------------------------------------------------------------
+//   Granted-Service-Unit          CreditGrant.granted_bytes
+//   Volume-Quota-Threshold        CreditGrant.threshold_bytes
+//   Validity-Time                 CreditGrant.validity_seconds
+//   Final-Unit-Indication         CreditGrant.final
+//   Final-Unit-Action TERMINATE   the node disconnects at exhaustion
+//   CCR-Update                    CreditRequest with reason=THRESHOLD/VALIDITY
+//   CCR-Termination               CreditRequest with reason=SESSION_ENDED
+//   Credit-Control-Failure-...    CreditGrant.on_hub_unreachable
+//
+// The lifecycle, straight from the RFC's state machine:
+//
+//   session starts -> node asks for credit (INITIAL)
+//   hub grants N bytes, threshold T, validity V
+//   node counts down locally
+//     consumed >= N - T ......... ask again (THRESHOLD) — early, so that a slow
+//                                 answer does not interrupt a paying customer
+//     V elapses ................. ask again (VALIDITY) — reconciles an idle
+//                                 user and proves the link still works
+//     consumed >= N and final ... disconnect NOW, no further asking
+//     consumed >= N and !final .. apply on_hub_unreachable
+//   session ends .............. report final usage (SESSION_ENDED)
+//
+// The last grant before a user's quota runs out is exact and carries final=true,
+// so the only overshoot that ever reaches the customer's bill is one poll
+// interval of traffic — not one grant.
+//
+// ============================================================================
+// COMPATIBILITY
+// ============================================================================
+//
+// Fields are only ever added, never renumbered or reused. New HubMessage
+// variants are ignored by older agents, which is what lets a node run an old
+// binary for weeks without breaking. protocol_version is bumped ONLY for a
+// change that an old agent would misread rather than ignore.
 
 package pb
 
@@ -47,7 +103,8 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type NodeHubClient interface {
-	// Opened once by the agent and held open. Reports flow up, commands down.
+	// Opened once by the agent and held open. Reports and credit requests flow
+	// up, grants and commands flow down.
 	Connect(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AgentMessage, HubMessage], error)
 }
 
@@ -76,7 +133,8 @@ type NodeHub_ConnectClient = grpc.BidiStreamingClient[AgentMessage, HubMessage]
 // All implementations must embed UnimplementedNodeHubServer
 // for forward compatibility.
 type NodeHubServer interface {
-	// Opened once by the agent and held open. Reports flow up, commands down.
+	// Opened once by the agent and held open. Reports and credit requests flow
+	// up, grants and commands flow down.
 	Connect(grpc.BidiStreamingServer[AgentMessage, HubMessage]) error
 	mustEmbedUnimplementedNodeHubServer()
 }
