@@ -12,26 +12,63 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import audit, nodes as nodes_mod, pki
+from .. import audit, livecache, nodes as nodes_mod, pki, sysmon, wireguard
 from ..database import get_session
 from ..deps import require_superadmin
 from ..models import LOCAL_NODE_ID, Node, Session as SessionRow
 from ..schemas import NodeCreate, NodeCreated, NodeOut, NodeUpdate
+from .stats import _port_bound
 
 router = APIRouter(
     prefix="/api/nodes", tags=["nodes"], dependencies=[Depends(require_superadmin)]
 )
 
 
+def _local_snapshot() -> tuple[dict, dict]:
+    """Stand in for the report node 1 never sends.
+
+    The panel server is node 1, and it has no agent — it reads its own kernel
+    directly. Without this its card would show zero tunnels and no host stats,
+    which is not "we don't know", it is "we know and threw it away". Shaped like
+    a report so the rest of the summariser does not care where it came from.
+    """
+    live = livecache.snapshot().get("online") or []
+    ppp = [s for s in live if getattr(s, "protocol", "") != "WireGuard"]
+    wg = [s for s in live if getattr(s, "protocol", "") == "WireGuard"]
+    try:
+        sysinfo = sysmon.collect()
+        host = {
+            "uptime_seconds": sysinfo.uptime_seconds,
+            "load1": sysinfo.load_1,
+            "mem_total_bytes": sysinfo.mem_total,
+            "mem_available_bytes": max(0, sysinfo.mem_total - sysinfo.mem_used),
+        }
+    except Exception:  # noqa: BLE001
+        host = {}
+    # Detect engines the same way /api/health does — by which port is bound, not
+    # by unit name. A service-name check already broke once here when a daemon
+    # ran under a different unit and the panel reported it as down.
+    host.update({
+        "xl2tpd_ok": _port_bound(1701),
+        "ipsec_ok": _port_bound(500) or _port_bound(4500),
+        "accel_ppp_ok": _port_bound(443),
+        "wireguard_ok": wireguard.iface_up(),
+    })
+    return {"ppp": ppp, "wg": wg}, host
+
+
 def _summarise(node: Node, sessions: int) -> NodeOut:
     """Flatten a node plus its newest report into something the UI can render."""
     report: dict = {}
-    if node.last_report:
+    host: dict = {}
+    if node.is_local:
+        report, host = _local_snapshot()
+    elif node.last_report:
         try:
             report = json.loads(node.last_report)
+            host = report.get("host") or {}
         except ValueError:
             report = {}
-    host = report.get("host") or {}
 
     online = False
     seen_seconds: int | None = None
@@ -69,6 +106,16 @@ def _summarise(node: Node, sessions: int) -> NodeOut:
         ipsec_ok=bool(host.get("ipsec_ok")),
         accel_ppp_ok=bool(host.get("accel_ppp_ok")),
         wireguard_ok=bool(host.get("wireguard_ok")),
+        rx_total_bytes=node.rx_total_bytes or 0,
+        tx_total_bytes=node.tx_total_bytes or 0,
+        # A node that stopped reporting is not moving traffic, whatever its
+        # last sample said. Showing a stale rate as "current" is worse than
+        # showing zero.
+        rx_rate_bps=(node.rx_rate_bps or 0) if online else 0,
+        tx_rate_bps=(node.tx_rate_bps or 0) if online else 0,
+        wg_port=node.wg_port,
+        sstp_port=node.sstp_port,
+        l2tp_port=node.l2tp_port,
     )
 
 
@@ -110,6 +157,9 @@ async def create_node(
         db, name=payload.name.strip(), address=(payload.address or "").strip(),
         note=(payload.note or "").strip(),
     )
+    node.wg_port = payload.wg_port
+    node.sstp_port = payload.sstp_port
+    node.l2tp_port = payload.l2tp_port
     await audit.record(db, "create_node", node.name, f"id={node.id}", actor=admin.username)
     await db.commit()
 
@@ -141,6 +191,29 @@ async def rotate_node(
     )
 
 
+@router.post("/{node_id}/reconnect", status_code=status.HTTP_202_ACCEPTED)
+async def reconnect_node(
+    node_id: int,
+    db: AsyncSession = Depends(get_session),
+    admin=Depends(require_superadmin),
+):
+    """Ask the hub to drop this node's stream so its agent redials.
+
+    Goes through the database because the hub runs as its own process; it
+    notices the request on the node's next report and closes the stream, and
+    the agent's backoff brings it back within seconds. Nothing is lost by
+    cutting mid-flight — the agent holds no state and re-derives everything
+    from the kernel on the next report.
+    """
+    node = await _get(db, node_id)
+    if node.is_local:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "The local node has no agent")
+    node.reconnect_requested_at = datetime.now(timezone.utc)
+    await audit.record(db, "reconnect_node", node.name, f"id={node.id}", actor=admin.username)
+    await db.commit()
+    return {"detail": "Reconnect requested"}
+
+
 @router.patch("/{node_id}", response_model=NodeOut)
 async def update_node(
     node_id: int,
@@ -167,6 +240,13 @@ async def update_node(
     if payload.enabled is not None:
         node.enabled = payload.enabled
         changed.append("enabled")
+    for field in ("wg_port", "sstp_port", "l2tp_port"):
+        value = getattr(payload, field)
+        if value is not None:
+            if not 1 <= value <= 65535:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{field} must be 1-65535")
+            setattr(node, field, value)
+            changed.append(field)
 
     await audit.record(db, "update_node", node.name, ", ".join(changed) or "no change", actor=admin.username)
     await db.commit()

@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
+from . import nodes as nodes_mod
 from .config import settings
 from .database import AsyncSessionLocal
 from .models import Node
@@ -171,12 +172,41 @@ async def _record_report(node_id: int, report) -> None:
             "wireguard_ok": report.host.wireguard_ok,
         },
     }
+    # Absolute counters in, deltas derived here against the previous report.
+    # This is the whole reason the wire carries absolutes: a resend contributes
+    # nothing instead of double-counting, and a dropped report is made up for by
+    # the next one instead of vanishing.
+    counters: dict[str, tuple[int, int]] = {
+        f"ppp:{s['ifname']}": (s["rx_bytes"], s["tx_bytes"]) for s in payload["ppp"]
+    }
+    counters.update(
+        {f"wg:{p['public_key']}": (p["rx_bytes"], p["tx_bytes"]) for p in payload["wg"]}
+    )
+
     async with AsyncSessionLocal() as db:
         node = await db.get(Node, node_id)
-        if node is not None:
-            node.last_seen_at = now
-            node.last_report = json.dumps(payload, separators=(",", ":"))
-            await db.commit()
+        if node is None:
+            return
+        previous: dict[str, tuple[int, int]] = {}
+        if node.last_report:
+            try:
+                old = json.loads(node.last_report)
+                previous = {
+                    f"ppp:{s['ifname']}": (s["rx_bytes"], s["tx_bytes"])
+                    for s in old.get("ppp", [])
+                }
+                previous.update({
+                    f"wg:{p['public_key']}": (p["rx_bytes"], p["tx_bytes"])
+                    for p in old.get("wg", [])
+                })
+            except (ValueError, KeyError):
+                previous = {}
+
+        nodes_mod.accumulate_traffic(node, counters, previous, now)
+        node.last_seen_at = now
+        node.last_report = json.dumps(payload, separators=(",", ":"))
+        await db.commit()
+        return node.reconnect_requested_at
 
 
 def build_servicer():
@@ -188,6 +218,7 @@ def build_servicer():
             node: Node | None = None
             reports = 0
             peer = context.peer()
+            connected_at = datetime.now(timezone.utc)
             try:
                 async for msg in request_iterator:
                     kind = msg.WhichOneof("payload")
@@ -241,7 +272,14 @@ def build_servicer():
                         return
 
                     if kind == "report":
-                        await _record_report(node.id, msg.report)
+                        requested = await _record_report(node.id, msg.report)
+                        # An operator asked this node to reconnect. Dropping the
+                        # stream is enough: the agent's own backoff brings it
+                        # straight back, and it re-derives everything from the
+                        # kernel, so nothing is lost by cutting mid-flight.
+                        if requested is not None and requested > connected_at:
+                            log.info("node %d: reconnect requested, dropping the stream", node.id)
+                            return
                         reports += 1
                         if reports == 1 or reports % 40 == 0:
                             r = LAST_REPORT[node.id]

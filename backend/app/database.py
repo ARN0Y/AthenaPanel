@@ -117,6 +117,15 @@ _PG_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("nodes", "hostname", "VARCHAR(128) NOT NULL DEFAULT ''"),
     ("nodes", "kernel", "VARCHAR(128) NOT NULL DEFAULT ''"),
     ("nodes", "last_report", "TEXT NOT NULL DEFAULT ''"),
+    ("nodes", "rx_total_bytes", "BIGINT NOT NULL DEFAULT 0"),
+    ("nodes", "tx_total_bytes", "BIGINT NOT NULL DEFAULT 0"),
+    ("nodes", "rx_rate_bps", "BIGINT NOT NULL DEFAULT 0"),
+    ("nodes", "tx_rate_bps", "BIGINT NOT NULL DEFAULT 0"),
+    ("nodes", "rate_at", "TIMESTAMPTZ"),
+    ("nodes", "reconnect_requested_at", "TIMESTAMPTZ"),
+    ("nodes", "wg_port", "INTEGER NOT NULL DEFAULT 51820"),
+    ("nodes", "sstp_port", "INTEGER NOT NULL DEFAULT 443"),
+    ("nodes", "l2tp_port", "INTEGER NOT NULL DEFAULT 1701"),
 ]
 
 

@@ -161,6 +161,34 @@ class Node(Base):
     # the hub's memory so that any process (the panel, an operator, the Phase 1
     # verifier) can read what the node last said without being the hub.
     last_report: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    # Traffic OBSERVED on this node, accumulated from absolute counters with a
+    # watermark. Deliberately separate from billing: this answers "how much has
+    # gone through this machine", which is a capacity question, while
+    # users.used_bytes answers "what do we charge", which is scaled and has its
+    # own rules. Mixing them would make one of the two wrong.
+    rx_total_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    tx_total_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    # Throughput from the last two observations. Stored rather than computed on
+    # read because the two samples it needs are seconds apart, not request-time.
+    rx_rate_bps: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    tx_rate_bps: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    rate_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Set by the panel, noticed by the hub, which then drops the node's stream.
+    # The agent's own backoff reconnects within seconds. Done through the
+    # database because the hub is a separate process — there is no other channel
+    # between them, and inventing one for a button would not be worth it.
+    reconnect_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # Per-node service ports. A node in one country may have to run WireGuard on
+    # 443 because 51820 is blocked, while another uses the default; without this
+    # every node has to look the same. Feeds config/subscription generation.
+    wg_port: Mapped[int] = mapped_column(Integer, default=51820, nullable=False)
+    sstp_port: Mapped[int] = mapped_column(Integer, default=443, nullable=False)
+    l2tp_port: Mapped[int] = mapped_column(Integer, default=1701, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     note: Mapped[str] = mapped_column(Text, default="", nullable=False)
 

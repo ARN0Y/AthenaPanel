@@ -326,6 +326,13 @@ export interface NodeInfo {
   ipsec_ok: boolean;
   accel_ppp_ok: boolean;
   wireguard_ok: boolean;
+  rx_total_bytes: number;
+  tx_total_bytes: number;
+  rx_rate_bps: number;
+  tx_rate_bps: number;
+  wg_port: number;
+  sstp_port: number;
+  l2tp_port: number;
 }
 
 /** Returned once, on registration or rotation. The panel keeps no copy of the
@@ -344,6 +351,9 @@ export interface NodePayload {
   address?: string;
   note?: string;
   enabled?: boolean;
+  wg_port?: number;
+  sstp_port?: number;
+  l2tp_port?: number;
 }
 
 export const api = {
@@ -449,5 +459,7 @@ export const api = {
     request<NodeInfo>(`/api/nodes/${id}`, { method: "PATCH", body: JSON.stringify(p) }),
   rotateNode: (id: number) =>
     request<NodeCredentials>(`/api/nodes/${id}/rotate`, { method: "POST" }),
+  reconnectNode: (id: number) =>
+    request<{ detail: string }>(`/api/nodes/${id}/reconnect`, { method: "POST" }),
   deleteNode: (id: number) => request<void>(`/api/nodes/${id}`, { method: "DELETE" }),
 };

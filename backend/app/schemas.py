@@ -316,11 +316,15 @@ class SessionDownIn(BaseModel):
 
 class NodeCreate(BaseModel):
     name: str
-    # What clients are pointed at for this node. Kept separate from wherever
-    # the agent dials the hub from: an entry address gets burned and swapped
-    # without the node itself changing.
+    # What clients are pointed at for this node. Optional at creation on
+    # purpose: at that moment the operator usually has a bare server and no
+    # entry yet, and demanding one up front just invites a placeholder that
+    # nobody ever corrects.
     address: str = ""
     note: str = ""
+    wg_port: int = 51820
+    sstp_port: int = 443
+    l2tp_port: int = 1701
 
 
 class NodeUpdate(BaseModel):
@@ -328,6 +332,9 @@ class NodeUpdate(BaseModel):
     address: str | None = None
     note: str | None = None
     enabled: bool | None = None
+    wg_port: int | None = None
+    sstp_port: int | None = None
+    l2tp_port: int | None = None
 
 
 class NodeCreated(BaseModel):
@@ -365,3 +372,12 @@ class NodeOut(BaseModel):
     ipsec_ok: bool = False
     accel_ppp_ok: bool = False
     wireguard_ok: bool = False
+    # Traffic observed on this node. A capacity figure, not an invoice — it is
+    # unscaled and counts every byte the machine moved.
+    rx_total_bytes: int = 0
+    tx_total_bytes: int = 0
+    rx_rate_bps: int = 0
+    tx_rate_bps: int = 0
+    wg_port: int = 51820
+    sstp_port: int = 443
+    l2tp_port: int = 1701

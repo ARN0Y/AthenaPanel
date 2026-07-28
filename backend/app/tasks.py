@@ -14,10 +14,16 @@ from . import (
 )
 from .config import settings
 from .database import AsyncSessionLocal
-from .models import LOCAL_NODE_ID, Session as SessionRow
+from .models import LOCAL_NODE_ID, Node, Session as SessionRow
 from .models import UsageSample, User, WgPeer
 
 log = logging.getLogger("vpn-panel.tasks")
+
+# Previous cycle's absolute counters for node 1, held in memory rather than the
+# database: it is a watermark for a delta, not state worth persisting, and the
+# enforcer is the only reader. A restart just costs one interval of accounting
+# on the node's capacity total (never on billing, which has its own path).
+_LOCAL_COUNTERS: dict[str, tuple[int, int]] = {}
 
 # A WireGuard peer counts as online while its last handshake is this recent.
 # WireGuard rekeys roughly every 2 minutes, so the window must comfortably
@@ -194,6 +200,25 @@ async def _enforce_once() -> None:
                 username=(u.username if u else ""),
                 proto="wg", rx_bytes=d["rx"], tx_bytes=d["tx"],
             ))
+
+        # --- 1.6) Node 1's own traffic totals --------------------------------
+        # The same accumulation the hub does for a remote node, applied to this
+        # server's own interfaces. Both paths go through nodes.accumulate_traffic
+        # so "traffic through this node" means the same thing on the Nodes page
+        # whether or not an agent is involved.
+        local_counters: dict[str, tuple[int, int]] = {
+            f"ppp:{row.ifname}": (row.last_rx, row.last_tx)
+            for rows in active_rows_by_user.values() for row in rows
+        }
+        local_counters.update({
+            f"wg:{peer.public_key}": (peer.last_rx, peer.last_tx)
+            for peer in wg_peers if wg_dump.get(peer.public_key)
+        })
+        local_node = await db.get(Node, LOCAL_NODE_ID)
+        if local_node is not None:
+            nodes.accumulate_traffic(local_node, local_counters, _LOCAL_COUNTERS, now)
+            _LOCAL_COUNTERS.clear()
+            _LOCAL_COUNTERS.update(local_counters)
 
         await db.commit()
 

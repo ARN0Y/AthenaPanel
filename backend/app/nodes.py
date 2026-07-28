@@ -13,7 +13,7 @@ first remote node exists rather than after the first wrong invoice.
 
 import logging
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -69,6 +69,52 @@ async def ensure_local(db: AsyncSession) -> Node:
         await _sync_id_sequence(db)
         log.info("registered the local server as node %d", LOCAL_NODE_ID)
     return node
+
+
+def accumulate_traffic(
+    node: Node,
+    counters: dict[str, tuple[int, int]],
+    previous: dict[str, tuple[int, int]],
+    now: datetime,
+) -> None:
+    """Fold one observation of a node's ABSOLUTE per-interface counters into its
+    running totals and throughput.
+
+    `counters` and `previous` are {key: (rx, tx)} for the same node, two
+    observations apart. Only positive movement counts, so a counter that reset
+    (interface bounced, peer re-added) contributes its new value rather than a
+    negative number — the same guard pppd.usage_delta applies, minus the billing
+    multiplier, because this is a capacity figure and not an invoice.
+
+    An interface that disappears simply stops contributing; its bytes are
+    already in the total. An interface that appears starts from its current
+    value, which slightly under-counts its first interval — the alternative,
+    treating the whole counter as new traffic, would wildly over-count instead.
+    """
+    rx_delta = tx_delta = 0
+    for key, (rx, tx) in counters.items():
+        prev = previous.get(key)
+        if prev is None:
+            continue
+        prx, ptx = prev
+        rx_delta += (rx - prx) if rx >= prx else rx
+        tx_delta += (tx - ptx) if tx >= ptx else tx
+
+    node.rx_total_bytes = (node.rx_total_bytes or 0) + max(0, rx_delta)
+    node.tx_total_bytes = (node.tx_total_bytes or 0) + max(0, tx_delta)
+
+    last = node.rate_at
+    if last is not None and last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    elapsed = (now - last).total_seconds() if last else 0.0
+    # Guard both ends: a sub-second gap makes the rate explode, and a long gap
+    # (node was away) would smear an hour of traffic into a "current" figure.
+    if 0.5 < elapsed < 120:
+        node.rx_rate_bps = int(max(0, rx_delta) * 8 / elapsed)
+        node.tx_rate_bps = int(max(0, tx_delta) * 8 / elapsed)
+    elif elapsed >= 120:
+        node.rx_rate_bps = node.tx_rate_bps = 0
+    node.rate_at = now
 
 
 def new_token() -> str:
