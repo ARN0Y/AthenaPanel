@@ -223,13 +223,17 @@ class UsageSample(Base):
 
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True, default=_utcnow)
     ifname: Mapped[str] = mapped_column(String(32), primary_key=True)
-    # NOTE: node_id is intentionally NOT part of the primary key yet. This is a
-    # 12M-row TimescaleDB hypertable; widening its PK rebuilds the index on every
-    # chunk, and it buys nothing while node 1 is the only node — (ts, ifname) is
-    # still unique. The PK must be widened to (ts, node_id, ifname) BEFORE the
-    # first remote node starts reporting, or two nodes' ppp0 will collide and
-    # take down a whole sample batch. Tracked as a Phase 2 prerequisite.
-    node_id: Mapped[int] = mapped_column(Integer, default=LOCAL_NODE_ID, nullable=False)
+    # node_id is part of the key: every node has a ppp0, so (ts, ifname) alone
+    # is unique only while one node exists. Two nodes sampling in the same
+    # second would collide, and Postgres rejects the whole batch rather than
+    # the one duplicate row — losing every other node's sample too.
+    #
+    # An existing database does NOT get this from the model; widening the key
+    # on a 12M-row hypertable takes an exclusive lock and rebuilds the index on
+    # every chunk, which must not happen implicitly during a panel restart.
+    # Run migrate-usage-pk.sh for that, deliberately. Fresh installs are created
+    # correctly from here.
+    node_id: Mapped[int] = mapped_column(Integer, primary_key=True, default=LOCAL_NODE_ID, nullable=False)
     username: Mapped[str] = mapped_column(String(128), default="", index=True, nullable=False)
     proto: Mapped[str] = mapped_column(String(8), default="", nullable=False)
     rx_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)

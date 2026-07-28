@@ -21,22 +21,44 @@ INSTALL_DIR=/opt/vpn-panel
 cd "$INSTALL_DIR/backend"
 set -a; . "$INSTALL_DIR/.env"; set +a
 
-"$INSTALL_DIR/backend/venv/bin/python" - "$NAME" "$ADDRESS" "$NOTE" <<'PY'
-import asyncio, sys
+OUT_DIR="${OUT_DIR:-/root/node-bundles}"
+mkdir -p "$OUT_DIR"; chmod 700 "$OUT_DIR"
+
+"$INSTALL_DIR/backend/venv/bin/python" - "$NAME" "$ADDRESS" "$NOTE" "$OUT_DIR" <<'PY'
+import asyncio, os, sys
 sys.path.insert(0, ".")
 from app.database import AsyncSessionLocal
-from app import nodes
+from app import nodes, pki
 
-name, address, note = sys.argv[1], sys.argv[2], sys.argv[3]
+name, address, note, out_dir = sys.argv[1:5]
 
 
 async def main():
     async with AsyncSessionLocal() as db:
         node = await nodes.register(db, name=name, address=address, note=note)
         await db.commit()
-        print(f"NODE_ID={node.id}")
-        print(f"NODE_NAME={node.name}")
-        print(f"TOKEN={node.token}")
+        node_id, token = node.id, node.token
+
+    # The node's identity material. Issued once, handed over once, never kept
+    # on the panel: only the CA stays here, so a panel compromise does not
+    # hand over every node's private key as well.
+    cert, key, ca = pki.issue_node(node_id, name)
+    d = os.path.join(out_dir, f"node-{node_id}")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    for fname, data, mode in (
+        ("node.crt", cert, 0o600),
+        ("node.key", key, 0o600),
+        ("ca.crt", ca, 0o644),
+    ):
+        p = os.path.join(d, fname)
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(data)
+
+    print(f"NODE_ID={node_id}")
+    print(f"NODE_NAME={name}")
+    print(f"TOKEN={token}")
+    print(f"BUNDLE={d}")
 
 
 asyncio.run(main())

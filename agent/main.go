@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -38,13 +39,22 @@ var Version = "dev"
 const protocolVersion = 1
 
 type config struct {
-	hub      string
-	token    string
-	wgIface  string
-	interval time.Duration
-	tls      bool
-	insecure bool
+	hub        string
+	token      string
+	wgIface    string
+	interval   time.Duration
+	caFile     string
+	certFile   string
+	keyFile    string
+	serverName string
+	insecure   bool
 }
+
+// tlsEnabled is derived, not configured: TLS is on whenever key material was
+// supplied. There is no flag to turn it off while still pointing at a remote
+// hub, because that is never something an operator should be one typo away
+// from doing.
+func (c config) tlsEnabled() bool { return c.caFile != "" || c.certFile != "" }
 
 func loadConfig() config {
 	c := config{}
@@ -52,8 +62,11 @@ func loadConfig() config {
 	flag.StringVar(&c.token, "token", env("ATHENA_TOKEN", ""), "this node's token")
 	flag.StringVar(&c.wgIface, "wg-iface", env("ATHENA_WG_IFACE", "wg-panel"), "WireGuard interface ('' to skip)")
 	flag.DurationVar(&c.interval, "interval", 15*time.Second, "report interval")
-	flag.BoolVar(&c.tls, "tls", env("ATHENA_TLS", "") == "1", "dial the hub over TLS")
-	flag.BoolVar(&c.insecure, "tls-skip-verify", false, "do not verify the hub certificate (testing only)")
+	flag.StringVar(&c.caFile, "ca", env("ATHENA_CA", ""), "PEM of the panel CA to pin")
+	flag.StringVar(&c.certFile, "cert", env("ATHENA_CERT", ""), "this node's client certificate")
+	flag.StringVar(&c.keyFile, "key", env("ATHENA_KEY", ""), "this node's client key")
+	flag.StringVar(&c.serverName, "server-name", env("ATHENA_SERVER_NAME", ""), "override the name checked against the hub certificate")
+	flag.BoolVar(&c.insecure, "tls-skip-verify", false, "do not verify the hub certificate (bring-up only)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -70,14 +83,31 @@ func env(k, def string) string {
 	return def
 }
 
+// isLoopback reports whether the hub address never leaves this machine, which
+// is the only case where running without TLS is defensible.
+func isLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.LUTC)
 	cfg := loadConfig()
 	if cfg.token == "" {
 		log.Fatal("no token: set ATHENA_TOKEN or pass -token")
 	}
+	if !cfg.tlsEnabled() && !isLoopback(cfg.hub) {
+		log.Fatalf("refusing to talk to %s without TLS: pass -ca/-cert/-key", cfg.hub)
+	}
 	log.Printf("athena-agent %s starting; hub=%s wg=%q interval=%s tls=%v",
-		Version, cfg.hub, cfg.wgIface, cfg.interval, cfg.tls)
+		Version, cfg.hub, cfg.wgIface, cfg.interval, cfg.tlsEnabled())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sig := make(chan os.Signal, 1)
@@ -120,10 +150,12 @@ func main() {
 
 func dial(ctx context.Context, cfg config) (*grpc.ClientConn, error) {
 	var creds grpc.DialOption
-	if cfg.tls {
-		creds = grpc.WithTransportCredentials(
-			credentials.NewTLS(tlsConfig(cfg.insecure)),
-		)
+	if cfg.tlsEnabled() {
+		tc, err := tlsConfig(cfg.caFile, cfg.certFile, cfg.keyFile, cfg.serverName, cfg.insecure)
+		if err != nil {
+			return nil, err
+		}
+		creds = grpc.WithTransportCredentials(credentials.NewTLS(tc))
 	} else {
 		creds = grpc.WithTransportCredentials(insecure.NewCredentials())
 	}

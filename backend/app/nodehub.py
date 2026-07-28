@@ -46,14 +46,58 @@ LAST_REPORT: dict[int, dict] = {}
 
 
 def _listen_address() -> str:
-    """Where the hub listens.
-
-    Defaults to loopback. Phase 1 validates against the local node, and a
-    control plane should not be exposed to the internet before it has TLS and
-    a hostname in front of it — nginx already terminates TLS for everything
-    else on this host and can `grpc_pass` here when a remote node appears.
-    """
+    """Where the hub listens. Loopback unless told otherwise."""
     return os.environ.get("NODEHUB_LISTEN", "127.0.0.1:50051")
+
+
+def _tls_enabled() -> bool:
+    """mTLS with the panel's own CA (see pki.py for why not Let's Encrypt).
+
+    Off only for a loopback-only hub, where the transport never leaves the
+    machine. Any listener reachable from outside must have it on.
+    """
+    return os.environ.get("NODEHUB_TLS", "1") != "0"
+
+
+def _server_credentials():
+    import grpc
+
+    from . import pki
+
+    if not (pki.HUB_CRT.exists() and pki.HUB_KEY.exists()):
+        raise RuntimeError(
+            f"TLS is on but {pki.HUB_CRT} is missing — run node-pki.sh first"
+        )
+    return grpc.ssl_server_credentials(
+        [(pki.HUB_KEY.read_bytes(), pki.HUB_CRT.read_bytes())],
+        root_certificates=pki.CA_CRT.read_bytes(),
+        # A client without a certificate signed by OUR CA never reaches the
+        # application at all — authentication happens before any message is
+        # parsed, so an unauthenticated peer cannot even probe the protocol.
+        require_client_auth=True,
+    )
+
+
+def _cert_node_id(context) -> int | None:
+    """Which node the presented client certificate claims to be."""
+    from . import pki
+
+    try:
+        chain = context.auth_context().get("x509_pem_cert") or []
+        if not chain:
+            return None
+        from cryptography import x509 as _x
+
+        cert = _x.load_pem_x509_certificate(chain[0])
+        return pki.node_id_from_cert(cert.public_bytes(_serialization().Encoding.DER))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _serialization():
+    from cryptography.hazmat.primitives import serialization
+
+    return serialization
 
 
 async def _authenticate(token: str) -> Node | None:
@@ -164,6 +208,18 @@ def build_servicer():
                             # learns nothing about which part was wrong.
                             log.warning("%s: rejected, unknown node token", peer)
                             return
+                        # The certificate says "one of ours", the token says
+                        # which one. Requiring both to agree means a stolen
+                        # certificate alone is not enough, and neither is a
+                        # stolen token.
+                        if _tls_enabled():
+                            claimed = _cert_node_id(context)
+                            if claimed != node.id:
+                                log.warning(
+                                    "%s: certificate is node %s but the token is node %d",
+                                    peer, claimed, node.id,
+                                )
+                                return
                         await _record_hello(node.id, msg.hello)
                         log.info(
                             "node %d (%s) connected from %s — agent %s, %s",
@@ -218,11 +274,21 @@ async def serve() -> None:
     server = grpc.aio.server()
     nodehub_pb2_grpc.add_NodeHubServicer_to_server(build_servicer(), server)
     addr = _listen_address()
-    server.add_insecure_port(addr)
+    tls = _tls_enabled()
+    if tls:
+        server.add_secure_port(addr, _server_credentials())
+    else:
+        if not addr.startswith(("127.0.0.1:", "localhost:", "[::1]:")):
+            raise RuntimeError(
+                f"refusing to listen on {addr} without TLS; "
+                "set NODEHUB_TLS=1 or bind loopback"
+            )
+        server.add_insecure_port(addr)
     await server.start()
     log.info(
-        "nodehub listening on %s (protocol v%d, report interval %ds)",
-        addr, PROTOCOL_VERSION, REPORT_INTERVAL_SECONDS,
+        "nodehub listening on %s (%s, protocol v%d, report interval %ds)",
+        addr, "mTLS" if tls else "PLAINTEXT loopback",
+        PROTOCOL_VERSION, REPORT_INTERVAL_SECONDS,
     )
 
     stop = asyncio.Event()
