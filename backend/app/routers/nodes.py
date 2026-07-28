@@ -110,7 +110,7 @@ async def create_node(
         db, name=payload.name.strip(), address=(payload.address or "").strip(),
         note=(payload.note or "").strip(),
     )
-    await audit.log(db, admin.username, "create_node", node.name, f"id={node.id}")
+    await audit.record(db, "create_node", node.name, f"id={node.id}", actor=admin.username)
     await db.commit()
 
     cert, key, ca = pki.issue_node(node.id, node.name)
@@ -131,7 +131,7 @@ async def rotate_node(
     if node.is_local:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "The local node has no agent")
     node.token = nodes_mod.new_token()
-    await audit.log(db, admin.username, "rotate_node", node.name, f"id={node.id}")
+    await audit.record(db, "rotate_node", node.name, f"id={node.id}", actor=admin.username)
     await db.commit()
 
     cert, key, ca = pki.issue_node(node.id, node.name)
@@ -168,7 +168,7 @@ async def update_node(
         node.enabled = payload.enabled
         changed.append("enabled")
 
-    await audit.log(db, admin.username, "update_node", node.name, ", ".join(changed) or "no change")
+    await audit.record(db, "update_node", node.name, ", ".join(changed) or "no change", actor=admin.username)
     await db.commit()
     counts = await _session_counts(db)
     return _summarise(node, counts.get(node.id, 0))
@@ -200,5 +200,5 @@ async def delete_node(
 
     name = node.name
     await db.delete(node)
-    await audit.log(db, admin.username, "delete_node", name, f"id={node_id}")
+    await audit.record(db, "delete_node", name, f"id={node_id}", actor=admin.username)
     await db.commit()
