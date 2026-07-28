@@ -131,7 +131,18 @@ def _summarise(node: Node, counts: tuple[int, int]) -> NodeOut:
 
     ppp_count, wg_count = counts
     if not node.is_local:
-        wg_count = len(report.get("wg") or [])
+        # Peers with a RECENT handshake, not every peer configured. The report
+        # lists the whole interface, which is provisioning, not presence —
+        # counting that would put "2 sessions" on a card whose node has one
+        # customer connected and one who installed the config last week.
+        # Same 180s window the rest of the panel uses for WireGuard.
+        now_unix = datetime.now(timezone.utc).timestamp()
+        wg_count = sum(
+            1
+            for p in (report.get("wg") or [])
+            if (p.get("last_handshake_unix") or 0) > 0
+            and now_unix - p["last_handshake_unix"] < nodesessions.WG_ONLINE_WINDOW
+        )
 
     online = False
     seen_seconds: int | None = None
