@@ -178,10 +178,12 @@ const HISTORY = 40; // ~3.5 min at the page's 5s refresh
  *  almost nothing — 236 bps could be a dying node or an idle one. A short trace
  *  answers "is this normal for this node right now", which is the question an
  *  operator is actually asking, and it costs one number per poll to keep. */
-function useRateHistory(nodes: NodeInfo[]) {
+function useRateHistory(nodes: NodeInfo[], updatedAt: number) {
   const [history, setHistory] = React.useState<Record<number, { rx: number[]; tx: number[] }>>({});
-  const stamp = nodes.map((n) => `${n.id}:${n.rx_rate_bps}:${n.tx_rate_bps}`).join("|");
 
+  // Keyed on WHEN the data arrived, not on what it says. Sampling only when a
+  // number changes would leave an idle node permanently blank, and "flat at
+  // zero for three minutes" is exactly as informative as a busy trace.
   React.useEffect(() => {
     if (!nodes.length) return;
     setHistory((prev) => {
@@ -196,7 +198,7 @@ function useRateHistory(nodes: NodeInfo[]) {
       return next; // nodes that vanished drop out with their history
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stamp]);
+  }, [updatedAt]);
 
   return history;
 }
@@ -793,7 +795,7 @@ function EditNodeDialog({
 
 export function Nodes() {
   const qc = useQueryClient();
-  const { data: nodes = [], isLoading, isFetching, refetch } = useQuery({
+  const { data: nodes = [], isLoading, isFetching, refetch, dataUpdatedAt } = useQuery({
     queryKey: ["nodes"],
     queryFn: api.listNodes,
     refetchInterval: 5000,
@@ -839,7 +841,7 @@ export function Nodes() {
     );
   }, [nodes, query]);
 
-  const history = useRateHistory(nodes);
+  const history = useRateHistory(nodes, dataUpdatedAt);
   const online = nodes.filter((n) => n.online && n.enabled).length;
   const totalRx = nodes.reduce((a, n) => a + n.rx_rate_bps, 0);
   const totalTx = nodes.reduce((a, n) => a + n.tx_rate_bps, 0);

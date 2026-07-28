@@ -38,7 +38,13 @@ type creditEngine struct {
 	// key, never a name, so without this a peer's traffic is unattributable and
 	// therefore unbillable.
 	wgOwners map[string]string
+	// account -> speed limit, also from the last sync. Held locally because the
+	// moment to apply it is when a session comes up, and that is the one moment
+	// a round trip to the master is least affordable.
+	rates map[string]rateLimit
 }
+
+type rateLimit struct{ down, up uint32 }
 
 func newCreditEngine(chapPath, chapServerField, wgIface string) *creditEngine {
 	return &creditEngine{
@@ -48,6 +54,7 @@ func newCreditEngine(chapPath, chapServerField, wgIface string) *creditEngine {
 		wgIface:  wgIface,
 		pollMs:   1000,
 		wgOwners: map[string]string{},
+		rates:    map[string]rateLimit{},
 		kick:     make(chan struct{}, 1),
 	}
 }
@@ -86,6 +93,18 @@ func (e *creditEngine) setWgOwners(m map[string]string) {
 	e.wgOwners = m
 }
 
+func (e *creditEngine) setRates(m map[string]rateLimit) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.rates = m
+}
+
+func (e *creditEngine) rateFor(username string) rateLimit {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.rates[username]
+}
+
 func (e *creditEngine) attach(send func(*pb.AgentMessage) error, pollMs int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -119,6 +138,17 @@ func (e *creditEngine) OnUp(ev hooks.Event) (bool, string) {
 	rx, tx := collect.IfaceBytes(ev.Ifname)
 	e.led.AddSession(ev.Username, ev.Ifname, ev.Pid, rx, tx)
 	log.Printf("session up: %s on %s (pid %d)", ev.Username, ev.Ifname, ev.Pid)
+
+	// The rate the customer is paying for. A tier that is charged and not
+	// applied is the kind of bug nobody reports, because the customer is only
+	// ever pleasantly surprised.
+	if r := e.rateFor(ev.Username); r.down > 0 || r.up > 0 {
+		if err := enforce.ApplyShaping(ev.Ifname, r.down, r.up); err != nil {
+			log.Printf("  shaping %s: %v", ev.Ifname, err)
+		} else {
+			log.Printf("  shaped %s: down %dkbit up %dkbit", ev.Ifname, r.down, r.up)
+		}
+	}
 	// The panel should show this customer now, not at the next tick.
 	e.reportNow()
 
@@ -181,7 +211,9 @@ func (e *creditEngine) applySync(s *pb.UserSync) (int, error) {
 	users := make([]enforce.User, 0, len(s.Users))
 	wgPeers := make([]enforce.WgPeer, 0)
 	wgOwners := make(map[string]string)
+	rates := make(map[string]rateLimit, len(s.Users))
 	for _, u := range s.Users {
+		rates[u.Username] = rateLimit{down: u.RateDownKbps, up: u.RateUpKbps}
 		users = append(users, enforce.User{
 			Username: u.Username, Password: u.Password, Enabled: u.Enabled,
 			RateDownKbps: u.RateDownKbps, RateUpKbps: u.RateUpKbps,
@@ -202,6 +234,7 @@ func (e *creditEngine) applySync(s *pb.UserSync) (int, error) {
 			wgOwners[p.PublicKey] = u.Username
 		}
 	}
+	e.setRates(rates)
 	n, err := enforce.WriteChapSecrets(e.chapPath, e.chapSrv, users)
 	if err != nil {
 		return 0, err
