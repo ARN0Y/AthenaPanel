@@ -8,6 +8,8 @@ rarely change; this is where the business rules live.
 from __future__ import annotations
 
 import logging
+import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -30,19 +32,84 @@ def _duration(started: datetime | None) -> int:
     return max(0, int((datetime.now(timezone.utc) - started).total_seconds()))
 
 
-def _effective_rate_bps(user: User, session_rx: int, session_tx: int, elapsed: float) -> int:
+@dataclass
+class _Spend:
+    """What this hub has already billed a user for, and when it last heard.
+
+    `grant_id` / `billed` are a watermark, NOT a record of the newest grant
+    issued. That distinction is the whole point: `consumed_bytes` on the wire is
+    CUMULATIVE under the grant the agent is holding, so the amount that is new
+    is whatever exceeds what was already billed under that same grant. Storing
+    the grant we last ISSUED instead would silently discard traffic every time a
+    reply failed to arrive — the agent would keep quoting the grant it still
+    holds, the hub would judge it superseded, and the customer would use real
+    bandwidth for free until the two happened to line up again.
+    """
+
+    grant_id: int = 0
+    billed: int = 0
+    at: float = 0.0
+
+
+# Per username. In memory because it is a de-duplication watermark, not a
+# ledger: losing it on restart costs at most one duplicate acceptance, while
+# persisting it would put a write on the hot path of every credit request.
+_SPEND: dict[str, _Spend] = {}
+
+
+def _bill_new_bytes(username: str, grant_id: int, consumed_bytes: int) -> tuple[int, float]:
+    """How much of `consumed_bytes` has not been billed yet, and over how long.
+
+    Three cases, and each one is a real thing that happens on a link between
+    continents:
+
+      * A newer grant than the watermark — everything reported under it is new.
+      * The SAME grant reported again with a larger cumulative figure — the
+        reply to the previous request never arrived and the agent is still
+        spending the grant it holds. Bill the difference.
+      * An older grant, or the same figure twice — a duplicate delivery. Bill
+        nothing.
+    """
+    now = time.monotonic()
+    st = _SPEND.get(username)
+    if st is None:
+        # Nothing known: either the first request ever, or the first after a
+        # restart. Accepted once, because refusing would throw away real traffic
+        # to protect against a replay that has never been observed.
+        _SPEND[username] = _Spend(grant_id=grant_id, billed=consumed_bytes, at=now)
+        return max(0, consumed_bytes), 0.0
+
+    elapsed = max(0.0, now - st.at) if st.at else 0.0
+    if grant_id > st.grant_id:
+        new = max(0, consumed_bytes)
+        st.grant_id, st.billed = grant_id, consumed_bytes
+    elif grant_id == st.grant_id:
+        new = max(0, consumed_bytes - st.billed)
+        st.billed = max(st.billed, consumed_bytes)
+    else:
+        new = 0
+    st.at = now
+    return new, elapsed
+
+
+def _forget_spend(username: str) -> None:
+    """Drop a user's watermark once they can no longer be served here."""
+    _SPEND.pop(username, None)
+
+
+def _effective_rate_bps(user: User, new_bytes: int, elapsed: float) -> int:
     """What speed to size this user's grant against.
 
     Prefers the rate they are actually achieving, because that is what decides
-    how long a grant lasts. Falls back to their configured ceiling, which is the
-    only bound we have before any traffic has been observed. Never zero — a
-    zero would collapse every grant to the floor and make a fast user ask
-    constantly.
+    how long a grant lasts — measured over the window between their last two
+    requests, which is the only interval this process can time accurately.
+
+    The configured ceiling is the floor of the estimate, not a fallback: an
+    account with NO rate limit would otherwise be sized from the 1 Mbps minimum
+    and end up asking for credit several times a second on a gigabit line.
     """
-    observed = 0
-    if elapsed > 1:
-        observed = int((session_rx + session_tx) * 8 / elapsed)
-    configured = max(user.rate_down_kbps, user.rate_up_kbps) * 1000
+    observed = int(new_bytes * 8 / elapsed) if elapsed > 1 and new_bytes > 0 else 0
+    configured = max(user.rate_down_kbps or 0, user.rate_up_kbps or 0) * 1000
     return max(observed, configured, 1_000_000)
 
 
@@ -64,35 +131,44 @@ async def handle_credit_request(
     give away traffic for free on the same crash, and the mistake would compound
     every time it happened.
 
-    `consumed_bytes` is relative to `grant_id`, so a duplicate delivery of the
-    same request contributes nothing the second time: the grant it names has
-    already been superseded and its consumption is dropped.
+    `consumed_bytes` is cumulative under `grant_id`; see _bill_new_bytes for how
+    a duplicate delivery and a retry after a lost reply are told apart.
     """
     async with AsyncSessionLocal() as db:
         user = (
             await db.execute(select(User).where(User.username == username))
         ).scalar_one_or_none()
         if user is None:
+            _forget_spend(username)
             return credit.refuse("no such account")
+
+        # Bill BEFORE deciding anything, including before checking which node
+        # this is. The bytes moved: whether the account has since been moved,
+        # disabled or exhausted changes what happens next, never whether the
+        # traffic that already flowed is real. Charging only for traffic the
+        # panel approves of is how a node ends up serving gigabytes for free
+        # during exactly the situations that matter most.
+        new_bytes, elapsed = _bill_new_bytes(username, grant_id, consumed_bytes)
+        if new_bytes > 0:
+            billed = int(new_bytes * settings.usage_multiplier)
+            user.used_bytes = (user.used_bytes or 0) + billed
+            log.debug(
+                "node %d: %s spent %d new bytes under grant %d (billed %d)",
+                node_id, username, new_bytes, grant_id, billed,
+            )
+        elif consumed_bytes > 0:
+            log.debug(
+                "node %d: %s reported %d bytes under grant %d, already billed",
+                node_id, username, consumed_bytes, grant_id,
+            )
 
         # A user is served by exactly one node. A request from anywhere else is
         # a stale agent that has not applied its sync yet; refusing is what
-        # stops a moved account being served in two places at once.
+        # stops a moved account being served in two places at once — but only
+        # after the traffic above has been paid for.
         if (user.node_id or 1) != node_id:
+            await db.commit()
             return credit.refuse("account is assigned to another node")
-
-        if consumed_bytes > 0 and _grant_is_current(user, grant_id):
-            billed = int(consumed_bytes * settings.usage_multiplier)
-            user.used_bytes = (user.used_bytes or 0) + billed
-            log.debug(
-                "node %d: %s spent %d bytes under grant %d (billed %d)",
-                node_id, username, consumed_bytes, grant_id, billed,
-            )
-        elif consumed_bytes > 0:
-            log.info(
-                "node %d: dropping %d bytes from %s under stale grant %d",
-                node_id, consumed_bytes, username, grant_id,
-            )
 
         if reason == "SESSION_ENDED":
             # The mirrored row is where this session's start time and address
@@ -120,11 +196,10 @@ async def handle_credit_request(
 
         grant = credit.allocate(
             remaining_bytes=remaining,
-            rate_bps=_effective_rate_bps(user, session_rx, session_tx, 0),
+            rate_bps=_effective_rate_bps(user, new_bytes, elapsed),
             enabled=user.enabled_for_auth,
             refuse_reason=_refusal_reason(user),
         )
-        _remember_grant(user, grant)
         await db.commit()
         return grant
 
@@ -137,25 +212,6 @@ def _refusal_reason(user: User) -> str:
     if user.quota_exceeded:
         return "quota exhausted"
     return ""
-
-
-# The newest grant id issued per user, in memory. It exists only to reject a
-# replayed CreditRequest, so losing it on restart is harmless: the first request
-# after a restart re-establishes it, and the window where a replay could slip
-# through is a few seconds rather than a billing error that persists.
-_CURRENT_GRANT: dict[str, int] = {}
-
-
-def _grant_is_current(user: User, grant_id: int) -> bool:
-    known = _CURRENT_GRANT.get(user.username)
-    # An INITIAL request carries grant_id 0 and no consumption; anything we have
-    # never seen is accepted once, because refusing it would lose real traffic
-    # after a hub restart.
-    return known is None or grant_id >= known
-
-
-def _remember_grant(user: User, grant: credit.Grant) -> None:
-    _CURRENT_GRANT[user.username] = grant.grant_id
 
 
 async def users_for_node(db: AsyncSession, node_id: int) -> list[User]:

@@ -14,11 +14,12 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import (
-    audit, livecache, nodes as nodes_mod, nodesessions, pki, sysmon, wireguard,
+    audit, chap_secrets, livecache, nodes as nodes_mod, nodesessions, pki,
+    sysmon, wireguard,
 )
 from ..database import get_session
 from ..deps import require_superadmin
-from ..models import LOCAL_NODE_ID, Node, Session as SessionRow
+from ..models import LOCAL_NODE_ID, Node, Session as SessionRow, User
 from ..schemas import NodeCreate, NodeCreated, NodeOut, NodeUpdate
 from .stats import _port_bound
 
@@ -343,6 +344,28 @@ async def delete_node(
             "deleting silent node %d (%s): dropped %d held session row(s)",
             node_id, name, dropped,
         )
+
+    # Accounts assigned here come home rather than being orphaned. A user whose
+    # node_id points at a row that no longer exists is served by nobody: they
+    # are absent from every node's account list and from the master's, so they
+    # simply stop being able to connect, with nothing in the UI to say why.
+    # Reassigning is also the reversible choice — the operator can move them out
+    # again, whereas silently broken accounts have to be found first.
+    stranded = (
+        await db.execute(select(User).where(User.node_id == node_id))
+    ).scalars().all()
+    for user in stranded:
+        user.node_id = LOCAL_NODE_ID
+        user.disconnect_requested_at = None
+
     await db.delete(node)
-    await audit.record(db, "delete_node", name, f"id={node_id}", actor=admin.username)
+    detail = f"id={node_id}"
+    if stranded:
+        detail += f", {len(stranded)} account(s) moved to node {LOCAL_NODE_ID}"
+        log.warning("node %d deleted: moved %d account(s) home", node_id, len(stranded))
+    await audit.record(db, "delete_node", name, detail, actor=admin.username)
     await db.commit()
+    if stranded:
+        # They are the local node's responsibility now, so it needs their
+        # credentials before they can authenticate again.
+        await chap_secrets.rewrite(db)

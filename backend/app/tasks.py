@@ -357,12 +357,18 @@ def _remote_rate(key: tuple[int, str], rx: int, tx: int) -> tuple[int, int]:
             return 0, 0
         return rx_bps, tx_bps
     dt = now - at
-    if dt <= 0 or rx < prx or tx < ptx:
+    if rx < prx or tx < ptx:
         # Counter restarted (the interface was reused): no rate can be derived
         # across the discontinuity, so start a fresh baseline instead of
         # reporting the whole counter as one interval's traffic.
         _remote_rate_cache[key] = (now, rx, tx, 0, 0)
         return 0, 0
+    if dt < 1.0:
+        # Two snapshots landed either side of a report. Dividing a full report
+        # interval of bytes by a fraction of a second would print a number tens
+        # of times the real rate; hold the last one until there is a window
+        # worth measuring over.
+        return rx_bps, tx_bps
     rx_bps = max(0, int((rx - prx) * 8 / dt))
     tx_bps = max(0, int((tx - ptx) * 8 / dt))
     _remote_rate_cache[key] = (now, rx, tx, rx_bps, tx_bps)

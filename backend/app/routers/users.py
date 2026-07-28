@@ -103,22 +103,23 @@ async def _rebaseline_open_sessions(db: AsyncSession, username: str) -> None:
     counter so the live overlay restarts from zero (without losing the iface
     counter or disconnecting the session).
 
-    Local sessions only — the rebaseline is done by reading this host's sysfs.
-    Rebaselining a session held on a remote node has to be a command sent to
-    that node, since only it can read its own counters (Phase 2).
+    A local session is rebaselined against this host's sysfs. A remote one is
+    rebaselined against the counter its node last reported, which is at most one
+    report interval old — good enough precisely because a remote session row is
+    a display, not a ledger: its billing lives in used_bytes, which the caller
+    has just zeroed. Skipping them instead would leave the reset user staring at
+    the pre-reset total until they happened to reconnect.
     """
     rows = (
-        await db.execute(
-            select(SessionRow).where(
-                SessionRow.node_id == LOCAL_NODE_ID,
-                SessionRow.username == username,
-            )
-        )
+        await db.execute(select(SessionRow).where(SessionRow.username == username))
     ).scalars().all()
     for r in rows:
-        if pppd.iface_exists(r.ifname):
+        if r.node_id == LOCAL_NODE_ID:
+            if not pppd.iface_exists(r.ifname):
+                continue
             rx, tx = pppd.read_iface_bytes(r.ifname)
-            r.base_rx, r.base_tx, r.last_rx, r.last_tx = rx, tx, rx, tx
+            r.last_rx, r.last_tx = rx, tx
+        r.base_rx, r.base_tx = r.last_rx, r.last_tx
 
 
 def _norm_mode(value: str | None) -> str:

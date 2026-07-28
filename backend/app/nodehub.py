@@ -135,8 +135,13 @@ async def _record_hello(node_id: int, hello) -> None:
         await db.commit()
 
 
-async def _record_report(node_id: int, report) -> None:
+async def _record_report(node_id: int, report):
     """Refresh the heartbeat, stash the payload, and mirror the node's sessions.
+
+    Returns (reconnect_requested_at, sync_requested_at), or None if the node row
+    has been deleted — a stream whose node no longer exists must not keep
+    running, or a deleted node would go on being served until its agent happened
+    to restart.
 
     The heartbeat is what nodes.authoritative_ids() reads to decide whether this
     node may close its own sessions. Writing it here, and only on a well-formed
@@ -195,7 +200,7 @@ async def _record_report(node_id: int, report) -> None:
     async with AsyncSessionLocal() as db:
         node = await db.get(Node, node_id)
         if node is None:
-            return None, None
+            return None
         previous: dict[str, tuple[int, int]] = {}
         if node.last_report:
             try:
@@ -339,7 +344,23 @@ def build_servicer():
                         continue
 
                     if kind == "report":
-                        requested, sync_requested = await _record_report(node.id, msg.report)
+                        recorded = await _record_report(node.id, msg.report)
+                        if recorded is None:
+                            log.warning("node %d no longer exists; closing its stream", node.id)
+                            LAST_REPORT.pop(node.id, None)
+                            return
+                        requested, sync_requested = recorded
+                        # An operator asked this node to reconnect. Dropping the
+                        # stream is enough: the agent's own backoff brings it
+                        # straight back, and it re-derives everything from the
+                        # kernel, so nothing is lost by cutting mid-flight.
+                        #
+                        # Checked BEFORE the disconnect queue is drained: claiming
+                        # a kick clears it, so draining into a stream that is
+                        # about to close would throw the request away.
+                        if requested is not None and requested > connected_at:
+                            log.info("node %d: reconnect requested, dropping the stream", node.id)
+                            return
                         # Operator-initiated kicks queued by the panel process.
                         # Drained here because a report is the one moment we
                         # know the stream is alive in both directions.
@@ -350,13 +371,6 @@ def build_servicer():
                                     username=username, reason=why
                                 )
                             )
-                        # An operator asked this node to reconnect. Dropping the
-                        # stream is enough: the agent's own backoff brings it
-                        # straight back, and it re-derives everything from the
-                        # kernel, so nothing is lost by cutting mid-flight.
-                        if requested is not None and requested > connected_at:
-                            log.info("node %d: reconnect requested, dropping the stream", node.id)
-                            return
                         # The panel writes a timestamp when an account changes;
                         # this is the only channel between the two processes.
                         if sync_requested is not None and (

@@ -147,7 +147,15 @@ func (e *creditEngine) applySync(s *pb.UserSync) (int, error) {
 	// Only sessions this agent knows about are touched: a name that is not in
 	// the ledger has nothing to drop, so an empty list is not an instruction to
 	// disconnect the whole node.
-	if s.Full {
+	if s.Full && len(s.Users) == 0 && e.anyLiveSession() {
+		// An empty list means "this node serves nobody now", which is a real
+		// thing an operator can do. It is also what a bug on the other end
+		// would look like, and here the two are indistinguishable — so the one
+		// case that would disconnect EVERY customer at once is the one case
+		// this does not act on. They are still cut individually as their credit
+		// is refused, which is slower and certain rather than fast and blind.
+		log.Printf("sync %d is empty while sessions are live; not mass-disconnecting", s.SyncId)
+	} else if s.Full {
 		allowed := make(map[string]bool, len(s.Users))
 		for _, u := range s.Users {
 			allowed[u.Username] = u.Enabled
@@ -265,6 +273,16 @@ func reasonOf(s string) pb.CreditRequest_Reason {
 	default:
 		return pb.CreditRequest_INITIAL
 	}
+}
+
+// anyLiveSession reports whether this node is currently serving anyone.
+func (e *creditEngine) anyLiveSession() bool {
+	for _, name := range e.led.Users() {
+		if e.led.SessionCount(name) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // disconnectUser drops every session a user has on this node, on the hub's
