@@ -117,6 +117,20 @@ class User(Base):
     disconnect_requested_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # How much of the credit grant a node is holding has already been billed.
+    #
+    # `consumed_bytes` on the wire is CUMULATIVE under one grant, so the amount
+    # that is new is whatever exceeds this watermark. It lives on the row rather
+    # than in the hub's memory because it is written in the same transaction as
+    # used_bytes — losing it would mean the next request re-bills everything the
+    # agent has spent under the grant it still holds, which is exactly what a
+    # hub restart used to do to every user with a live session.
+    #
+    # Zero means "never seen". That is treated as unknown rather than as an old
+    # grant, so the first request after this column appeared bills nothing
+    # instead of billing a whole grant twice.
+    credit_grant_id: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    credit_billed_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
 
     # Which admin owns/created this user (NULL = legacy/superadmin-owned)
     created_by_admin_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)

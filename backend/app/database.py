@@ -57,6 +57,8 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("l2tp_mode", "VARCHAR(8) NOT NULL DEFAULT 'ipsec'"),
         ("node_id", "INTEGER NOT NULL DEFAULT 1"),
         ("disconnect_requested_at", "DATETIME"),
+        ("credit_grant_id", "BIGINT NOT NULL DEFAULT 0"),
+        ("credit_billed_bytes", "BIGINT NOT NULL DEFAULT 0"),
     ],
     # Self-healing accounting (v2): per-session billing baseline + proto + a
     # debounce counter so a transient sysfs miss never drops a live session.
@@ -150,6 +152,10 @@ _PG_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("users", "node_id", "INTEGER NOT NULL DEFAULT 1"),
     # Pending "kick this account off its node" request; see models.User.
     ("users", "disconnect_requested_at", "TIMESTAMPTZ"),
+    # The credit watermark. Persisted so a hub restart cannot re-bill a grant
+    # the agent is still holding; see models.User.
+    ("users", "credit_grant_id", "BIGINT NOT NULL DEFAULT 0"),
+    ("users", "credit_billed_bytes", "BIGINT NOT NULL DEFAULT 0"),
 ]
 
 

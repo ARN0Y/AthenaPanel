@@ -33,6 +33,7 @@ poll interval, never one grant.
 from __future__ import annotations
 
 import itertools
+import time as _time
 from dataclasses import dataclass
 
 # Smallest grant. Below this a busy session would spend more time asking for
@@ -64,7 +65,18 @@ VALIDITY_SECONDS = 300
 # packets themselves.
 CREDIT_POLL_MS = 1000
 
-_grant_ids = itertools.count(1)
+# Grant ids must increase across hub RESTARTS, not merely within a process.
+#
+# The hub compares an incoming request's grant id against a watermark it has
+# persisted for that user. Restarting the counter at 1 would make every freshly
+# issued grant compare as OLDER than the watermark left by the previous process,
+# so the user's consumption would be judged stale and dropped — they would run
+# unbilled until the counter climbed past a number it could take days to reach.
+#
+# Seeding from the wall clock in milliseconds is enough: it is monotonic across
+# restarts, needs no coordination, and cannot collide with the previous run's
+# ids unless the clock steps backwards further than that run issued grants.
+_grant_ids = itertools.count(int(_time.time() * 1000))
 
 
 @dataclass(frozen=True)

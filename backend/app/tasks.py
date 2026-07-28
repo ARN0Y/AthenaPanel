@@ -273,11 +273,19 @@ async def _enforce_once() -> None:
                 continue
             if (user.node_id or LOCAL_NODE_ID) != LOCAL_NODE_ID:
                 # Served by another node, which holds this peer on ITS interface
-                # and enforces it through the credit loop. Re-adding it here
-                # would put the same key on two servers, so the customer would
-                # be connected in two places and only one of them would bill.
-                # (Kicking is not needed either: the peer is not on this iface,
-                # so `on_iface` is already false.)
+                # and enforces it through the credit loop. Never ADD it here:
+                # the same key on two servers connects the customer twice and
+                # only one of those places bills them.
+                #
+                # But it may already BE here, because moving an account does not
+                # touch WireGuard — the peer this panel added while the user was
+                # on node 1 keeps working until something removes it. So this
+                # takes it off rather than merely skipping, which is what makes
+                # a move actually move the customer.
+                if peer.public_key in wg_dump:
+                    await wireguard.remove_peer(peer.public_key)
+                    log.info("wg removed %s here; served by node %d now",
+                             user.username, user.node_id)
                 continue
             ppp_live = sum(
                 sum(pppd.session_usage(r.last_rx, r.last_tx, r.base_rx, r.base_tx))

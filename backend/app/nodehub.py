@@ -157,9 +157,16 @@ async def _record_report(node_id: int, report):
     stays entirely on the credit path.
     """
     now = datetime.now(timezone.utc)
+    # The agent could not enumerate its own interfaces. It still sends a report
+    # so the heartbeat is not lost, but its ppp list is empty for want of a
+    # reading — NOT because the sessions ended. Conflating those is what the
+    # flag exists to prevent, and acting on the empty list would close every
+    # session on the node 30 seconds into a transient /sys hiccup.
+    scan_ok = not bool(report.ppp_scan_failed)
     LAST_REPORT[node_id] = payload = {
         "at": now.isoformat(),
         "sent_at_unix_ms": report.sent_at_unix_ms,
+        "ppp_scan_failed": not scan_ok,
         "ppp": [
             {
                 "ifname": s.ifname,
@@ -192,35 +199,50 @@ async def _record_report(node_id: int, report):
             "wireguard_ok": report.host.wireguard_ok,
         },
     }
-    # Absolute counters in, deltas derived here against the previous report.
-    # This is the whole reason the wire carries absolutes: a resend contributes
-    # nothing instead of double-counting, and a dropped report is made up for by
-    # the next one instead of vanishing.
-    counters: dict[str, tuple[int, int]] = {
-        f"ppp:{s['ifname']}": (s["rx_bytes"], s["tx_bytes"]) for s in payload["ppp"]
-    }
-    counters.update(
-        {f"wg:{p['public_key']}": (p["rx_bytes"], p["tx_bytes"]) for p in payload["wg"]}
-    )
-
     async with AsyncSessionLocal() as db:
         node = await db.get(Node, node_id)
         if node is None:
             return None
         previous: dict[str, tuple[int, int]] = {}
+        previous_ppp: list[dict] = []
         if node.last_report:
             try:
                 old = json.loads(node.last_report)
+                previous_ppp = old.get("ppp") or []
                 previous = {
                     f"ppp:{s['ifname']}": (s["rx_bytes"], s["tx_bytes"])
-                    for s in old.get("ppp", [])
+                    for s in previous_ppp
                 }
                 previous.update({
                     f"wg:{p['public_key']}": (p["rx_bytes"], p["tx_bytes"])
                     for p in old.get("wg", [])
                 })
             except (ValueError, KeyError):
-                previous = {}
+                previous, previous_ppp = {}, []
+
+        if not scan_ok:
+            # Carry the last known interfaces forward rather than storing an
+            # empty list. Two things depend on it: the delta below would
+            # otherwise see every interface vanish and then reappear with no
+            # baseline, losing an interval of this node's traffic total, and the
+            # next report would have nothing to compare against either.
+            payload["ppp"] = previous_ppp
+            log.warning(
+                "node %d: ppp scan failed on the node; holding %d session(s) "
+                "and its traffic counters this interval",
+                node_id, len(previous_ppp),
+            )
+
+        # Absolute counters in, deltas derived here against the previous report.
+        # This is the whole reason the wire carries absolutes: a resend
+        # contributes nothing instead of double-counting, and a dropped report
+        # is made up for by the next one instead of vanishing.
+        counters: dict[str, tuple[int, int]] = {
+            f"ppp:{s['ifname']}": (s["rx_bytes"], s["tx_bytes"]) for s in payload["ppp"]
+        }
+        counters.update(
+            {f"wg:{p['public_key']}": (p["rx_bytes"], p["tx_bytes"]) for p in payload["wg"]}
+        )
 
         nodes_mod.accumulate_traffic(node, counters, previous, now)
         node.last_seen_at = now
@@ -229,7 +251,13 @@ async def _record_report(node_id: int, report):
         # the commit below is lost and the node looks silent for one interval,
         # which is the safe direction — a held session is a delayed ledger row,
         # while a wrongly-closed one is a wrong invoice.
-        await nodesessions.apply_report(db, node_id, payload["ppp"], now)
+        #
+        # The mirror is skipped entirely when the scan failed. An empty list
+        # there is absence of evidence, and reconciling against it would close
+        # every session on the node — the same mistake as treating a silent node
+        # as an empty one, which nodes.authoritative_ids exists to prevent.
+        if scan_ok:
+            await nodesessions.apply_report(db, node_id, payload["ppp"], now)
         await nodesessions.apply_wg_report(db, node_id, payload["wg"], now)
         await db.commit()
         return node.reconnect_requested_at, node.sync_requested_at

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -32,69 +31,87 @@ def _duration(started: datetime | None) -> int:
     return max(0, int((datetime.now(timezone.utc) - started).total_seconds()))
 
 
-@dataclass
-class _Spend:
-    """What this hub has already billed a user for, and when it last heard.
+def _bill_new_bytes(user: User, grant_id: int, consumed_bytes: int) -> int:
+    """How much of `consumed_bytes` has not been billed yet. Mutates the user's
+    watermark; the caller persists it in the same transaction as used_bytes.
 
-    `grant_id` / `billed` are a watermark, NOT a record of the newest grant
-    issued. That distinction is the whole point: `consumed_bytes` on the wire is
-    CUMULATIVE under the grant the agent is holding, so the amount that is new
-    is whatever exceeds what was already billed under that same grant. Storing
-    the grant we last ISSUED instead would silently discard traffic every time a
-    reply failed to arrive — the agent would keep quoting the grant it still
-    holds, the hub would judge it superseded, and the customer would use real
-    bandwidth for free until the two happened to line up again.
+    `consumed_bytes` is CUMULATIVE under the grant the agent is holding, so what
+    is new is whatever exceeds the watermark for that same grant. Four cases,
+    each a real thing that happens on a link between continents:
+
+      * No watermark at all — we cannot know how much of this figure has
+        already been billed, so NOTHING is billed and the position is simply
+        adopted. Under-charging once beats charging a customer twice, and this
+        happens exactly once per account: on the first request after the
+        watermark columns appeared.
+      * A newer grant — the agent rebased its own counter when it applied that
+        grant, so everything reported under it is new.
+      * The SAME grant with a larger cumulative figure — the reply to the
+        previous request never arrived and the agent is still spending the grant
+        it holds. Bill the difference. Without this the traffic would be lost:
+        the agent keeps quoting the grant it has, and a watermark that tracked
+        the grant we last ISSUED would judge it superseded forever.
+      * An older grant, or the same figure twice — a duplicate delivery, or a
+        node the account has already been moved away from. Bill nothing.
     """
+    known = user.credit_grant_id or 0
+    billed = user.credit_billed_bytes or 0
+    consumed = max(0, consumed_bytes)
 
-    grant_id: int = 0
-    billed: int = 0
-    at: float = 0.0
-
-
-# Per username. In memory because it is a de-duplication watermark, not a
-# ledger: losing it on restart costs at most one duplicate acceptance, while
-# persisting it would put a write on the hot path of every credit request.
-_SPEND: dict[str, _Spend] = {}
-
-
-def _bill_new_bytes(username: str, grant_id: int, consumed_bytes: int) -> tuple[int, float]:
-    """How much of `consumed_bytes` has not been billed yet, and over how long.
-
-    Three cases, and each one is a real thing that happens on a link between
-    continents:
-
-      * A newer grant than the watermark — everything reported under it is new.
-      * The SAME grant reported again with a larger cumulative figure — the
-        reply to the previous request never arrived and the agent is still
-        spending the grant it holds. Bill the difference.
-      * An older grant, or the same figure twice — a duplicate delivery. Bill
-        nothing.
-    """
-    now = time.monotonic()
-    st = _SPEND.get(username)
-    if st is None:
-        # Nothing known: either the first request ever, or the first after a
-        # restart. Accepted once, because refusing would throw away real traffic
-        # to protect against a replay that has never been observed.
-        _SPEND[username] = _Spend(grant_id=grant_id, billed=consumed_bytes, at=now)
-        return max(0, consumed_bytes), 0.0
-
-    elapsed = max(0.0, now - st.at) if st.at else 0.0
-    if grant_id > st.grant_id:
-        new = max(0, consumed_bytes)
-        st.grant_id, st.billed = grant_id, consumed_bytes
-    elif grant_id == st.grant_id:
-        new = max(0, consumed_bytes - st.billed)
-        st.billed = max(st.billed, consumed_bytes)
+    if known == 0:
+        # Unknown, and deliberately NOT guessed at: adopting `grant_id` here
+        # would claim `consumed` had already been billed when it may not have
+        # been, or bill it when it already was. The position is established
+        # instead by anchor_grant() once a grant is actually issued, which is
+        # the first moment the hub knows a figure it can trust.
+        return 0
+    if grant_id > known:
+        # The agent rebased its own counter when it applied this grant, so
+        # everything reported under it is new.
+        new = consumed
+        user.credit_grant_id, user.credit_billed_bytes = grant_id, consumed
+    elif grant_id == known:
+        new = max(0, consumed - billed)
+        user.credit_billed_bytes = max(billed, consumed)
     else:
-        new = 0
-    st.at = now
-    return new, elapsed
+        new = 0  # stale grant: leave the watermark exactly where it is
+    return new
+
+
+def anchor_grant(user: User, grant: credit.Grant) -> None:
+    """Give a user a watermark to compare against, once and only once.
+
+    Called after a real grant is issued and ONLY while the watermark is unknown.
+    That restriction is the whole design: advancing it on every issue is what
+    the old code did, and it is why a grant whose reply never arrived had its
+    traffic dropped forever — the agent kept quoting the grant it still held,
+    while the hub had already moved past it.
+
+    Anchoring from unknown loses nothing, because in that state there was no
+    figure to compare against in the first place.
+    """
+    if (user.credit_grant_id or 0) == 0 and grant.is_service:
+        user.credit_grant_id = grant.grant_id
+        user.credit_billed_bytes = 0
+
+
+# When each user was last heard from, for the throughput estimate that sizes
+# their next grant. Purely a heuristic input, so it stays in memory: losing it
+# on restart costs one grant sized from the configured rate instead of the
+# observed one, which is the conservative direction anyway.
+_LAST_SEEN: dict[str, float] = {}
+
+
+def _observed_window(username: str) -> float:
+    now = time.monotonic()
+    previous = _LAST_SEEN.get(username)
+    _LAST_SEEN[username] = now
+    return max(0.0, now - previous) if previous else 0.0
 
 
 def _forget_spend(username: str) -> None:
-    """Drop a user's watermark once they can no longer be served here."""
-    _SPEND.pop(username, None)
+    """Drop a user's in-memory timing once they can no longer be served here."""
+    _LAST_SEEN.pop(username, None)
 
 
 def _effective_rate_bps(user: User, new_bytes: int, elapsed: float) -> int:
@@ -148,7 +165,8 @@ async def handle_credit_request(
         # traffic that already flowed is real. Charging only for traffic the
         # panel approves of is how a node ends up serving gigabytes for free
         # during exactly the situations that matter most.
-        new_bytes, elapsed = _bill_new_bytes(username, grant_id, consumed_bytes)
+        elapsed = _observed_window(username)
+        new_bytes = _bill_new_bytes(user, grant_id, consumed_bytes)
         if new_bytes > 0:
             billed = int(new_bytes * settings.usage_multiplier)
             user.used_bytes = (user.used_bytes or 0) + billed
@@ -200,6 +218,7 @@ async def handle_credit_request(
             enabled=user.enabled_for_auth,
             refuse_reason=_refusal_reason(user),
         )
+        anchor_grant(user, grant)
         await db.commit()
         return grant
 
