@@ -22,6 +22,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/ARN0Y/AthenaPanel/agent/internal/collect"
+	"github.com/ARN0Y/AthenaPanel/agent/internal/hooks"
 	pb "github.com/ARN0Y/AthenaPanel/agent/pb"
 )
 
@@ -48,6 +50,9 @@ type config struct {
 	keyFile    string
 	serverName string
 	insecure   bool
+	hookAddr   string
+	chapPath   string
+	chapServer string
 }
 
 // tlsEnabled is derived, not configured: TLS is on whenever key material was
@@ -67,6 +72,9 @@ func loadConfig() config {
 	flag.StringVar(&c.keyFile, "key", env("ATHENA_KEY", ""), "this node's client key")
 	flag.StringVar(&c.serverName, "server-name", env("ATHENA_SERVER_NAME", ""), "override the name checked against the hub certificate")
 	flag.BoolVar(&c.insecure, "tls-skip-verify", false, "do not verify the hub certificate (bring-up only)")
+	flag.StringVar(&c.hookAddr, "hook-addr", env("ATHENA_HOOK_ADDR", "127.0.0.1:8711"), "loopback endpoint the ppp scripts call")
+	flag.StringVar(&c.chapPath, "chap-secrets", env("ATHENA_CHAP_SECRETS", "/etc/ppp/chap-secrets"), "account file this node authenticates against")
+	flag.StringVar(&c.chapServer, "chap-server", env("ATHENA_CHAP_SERVER", "*"), "server field written into chap-secrets")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -109,6 +117,19 @@ func main() {
 	log.Printf("athena-agent %s starting; hub=%s wg=%q interval=%s tls=%v",
 		Version, cfg.hub, cfg.wgIface, cfg.interval, cfg.tlsEnabled())
 
+	// The engine outlives every stream: a reconnect must not reset anyone's
+	// spent credit, or a network blip would hand out free traffic.
+	engine := newCreditEngine(cfg.chapPath, cfg.chapServer)
+	hookSrv := hooks.New(cfg.hookAddr, engine)
+	if err := hookSrv.Start(); err != nil {
+		log.Fatalf("hook endpoint: %v", err)
+	}
+	defer hookSrv.Close()
+
+	stopCredit := make(chan struct{})
+	go engine.runCredit(stopCredit)
+	defer close(stopCredit)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -124,7 +145,7 @@ func main() {
 	backoff := time.Second
 	for ctx.Err() == nil {
 		start := time.Now()
-		err := runSession(ctx, cfg)
+		err := runSession(ctx, cfg, engine)
 		if ctx.Err() != nil {
 			break
 		}
@@ -165,7 +186,7 @@ func dial(ctx context.Context, cfg config) (*grpc.ClientConn, error) {
 }
 
 // runSession opens one stream and reports on it until it breaks.
-func runSession(ctx context.Context, cfg config) error {
+func runSession(ctx context.Context, cfg config, engine *creditEngine) error {
 	conn, err := dial(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", cfg.hub, err)
@@ -186,6 +207,9 @@ func runSession(ctx context.Context, cfg config) error {
 			Hostname:        collect.Hostname(),
 			Os:              collect.OSName(),
 			Kernel:          collect.Kernel(),
+			HasL2Tp:         collect.PortBound(1701),
+			HasSstp:         collect.PortBound(443),
+			HasWireguard:    cfg.wgIface != "",
 		}},
 	}); err != nil {
 		return fmt.Errorf("send hello: %w", err)
@@ -205,24 +229,51 @@ func runSession(ctx context.Context, cfg config) error {
 	if w.ReportIntervalSeconds > 0 {
 		interval = time.Duration(w.ReportIntervalSeconds) * time.Second
 	}
-	log.Printf("connected as node %d (%s); reporting every %s",
-		w.NodeId, w.NodeName, interval)
+	log.Printf("connected as node %d (%s); reporting every %s, credit poll %dms",
+		w.NodeId, w.NodeName, interval, w.CreditPollMs)
 
-	// Drain acks so flow control never stalls; a read error is how we learn
-	// the stream died.
+	// One writer per stream. gRPC streams are not safe for concurrent Send, and
+	// the credit loop and the report ticker both need to write.
+	var sendMu sync.Mutex
+	send := func(m *pb.AgentMessage) error {
+		sendMu.Lock()
+		defer sendMu.Unlock()
+		return stream.Send(m)
+	}
+	engine.attach(send, int(w.CreditPollMs))
+	defer engine.detach()
+
+	// Read continuously: acks keep flow control moving, grants and syncs are
+	// the whole point, and a read error is how we learn the stream died.
 	recvErr := make(chan error, 1)
 	go func() {
 		for {
-			if _, err := stream.Recv(); err != nil {
+			msg, err := stream.Recv()
+			if err != nil {
 				recvErr <- err
 				return
+			}
+			switch p := msg.Payload.(type) {
+			case *pb.HubMessage_CreditGrant:
+				engine.applyGrant(p.CreditGrant)
+			case *pb.HubMessage_UserSync:
+				n, err := engine.applySync(p.UserSync)
+				ack := &pb.SyncAck{SyncId: p.UserSync.SyncId, Ok: err == nil, UsersApplied: uint32(n)}
+				if err != nil {
+					ack.Detail = err.Error()
+					log.Printf("sync %d failed: %v", p.UserSync.SyncId, err)
+				}
+				_ = send(&pb.AgentMessage{Payload: &pb.AgentMessage_SyncAck{SyncAck: ack}})
+			case *pb.HubMessage_Disconnect:
+				log.Printf("hub asked to disconnect %s: %s", p.Disconnect.Username, p.Disconnect.Reason)
+				engine.disconnectUser(p.Disconnect.Username)
 			}
 		}
 	}()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	if err := sendReport(stream, cfg); err != nil {
+	if err := sendReport(send, cfg); err != nil {
 		return err
 	}
 	for {
@@ -236,14 +287,14 @@ func runSession(ctx context.Context, cfg config) error {
 			}
 			return fmt.Errorf("recv: %w", err)
 		case <-ticker.C:
-			if err := sendReport(stream, cfg); err != nil {
+			if err := sendReport(send, cfg); err != nil {
 				return err
 			}
 		}
 	}
 }
 
-func sendReport(stream pb.NodeHub_ConnectClient, cfg config) error {
+func sendReport(send func(*pb.AgentMessage) error, cfg config) error {
 	host := collect.Health(cfg.wgIface)
 	rep := &pb.Report{
 		SentAtUnixMs: time.Now().UnixMilli(),
@@ -261,7 +312,9 @@ func sendReport(stream pb.NodeHub_ConnectClient, cfg config) error {
 
 	// Only include the session list when the scan actually worked. Sending an
 	// empty list after a failed read would tell the hub every user vanished.
-	if ppp, ok := collect.PppInterfaces(); ok {
+	ppp, scanOK := collect.PppInterfaces()
+	rep.PppScanFailed = !scanOK
+	if scanOK {
 		for _, p := range ppp {
 			rep.Ppp = append(rep.Ppp, &pb.PppSession{
 				Ifname:  p.Ifname,
@@ -272,7 +325,7 @@ func sendReport(stream pb.NodeHub_ConnectClient, cfg config) error {
 			})
 		}
 	} else {
-		log.Print("ppp scan failed; omitting the session list from this report")
+		log.Print("ppp scan failed; the report says so rather than claiming nobody is connected")
 	}
 
 	if cfg.wgIface != "" {
@@ -289,7 +342,7 @@ func sendReport(stream pb.NodeHub_ConnectClient, cfg config) error {
 		}
 	}
 
-	return stream.Send(&pb.AgentMessage{
+	return send(&pb.AgentMessage{
 		Payload: &pb.AgentMessage_Report{Report: rep},
 	})
 }

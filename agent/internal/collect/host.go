@@ -118,3 +118,33 @@ func OSName() string {
 	}
 	return ""
 }
+
+// PortBound reports whether anything is listening on a port, read straight from
+// /proc. Used to advertise what this node can actually terminate, the same way
+// the panel decides it — by what is bound, not by which unit happens to exist.
+func PortBound(port int) bool {
+	target := strings.ToUpper(strconv.FormatInt(int64(port), 16))
+	if len(target) < 4 {
+		target = strings.Repeat("0", 4-len(target)) + target
+	}
+	for _, fn := range []string{"/proc/net/udp", "/proc/net/udp6", "/proc/net/tcp", "/proc/net/tcp6"} {
+		b, err := os.ReadFile(fn)
+		if err != nil {
+			continue
+		}
+		for i, line := range strings.Split(string(b), "\n") {
+			if i == 0 {
+				continue
+			}
+			f := strings.Fields(line)
+			if len(f) < 2 {
+				continue
+			}
+			if idx := strings.LastIndex(f[1], ":"); idx >= 0 &&
+				strings.ToUpper(f[1][idx+1:]) == target {
+				return true
+			}
+		}
+	}
+	return false
+}

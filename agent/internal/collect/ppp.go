@@ -129,3 +129,12 @@ func readUint(path string) (uint64, bool) {
 	}
 	return v, true
 }
+
+// IfaceBytes reads one interface's counters. Used when a session is registered,
+// to take its baseline at exactly the moment it appears rather than at the next
+// poll — otherwise the first tick of its traffic would go uncounted.
+func IfaceBytes(ifname string) (rx, tx uint64) {
+	rx, _ = readUint(netDir + "/" + ifname + "/statistics/rx_bytes")
+	tx, _ = readUint(netDir + "/" + ifname + "/statistics/tx_bytes")
+	return rx, tx
+}
