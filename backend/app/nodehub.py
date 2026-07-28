@@ -132,6 +132,12 @@ async def _record_hello(node_id: int, hello) -> None:
         node.agent_version = (hello.agent_version or "")[:32]
         node.hostname = (hello.hostname or "")[:128]
         node.kernel = (hello.kernel or "")[:128]
+        # Recorded, not configured: the key belongs to the node's interface, and
+        # an operator typing it in could only ever make it wrong. Empty means
+        # the node has no WireGuard, which is a normal thing for a node to be.
+        node.wg_public_key = (hello.wg_public_key or "")[:64]
+        if hello.wg_listen_port:
+            node.wg_port = int(hello.wg_listen_port)
         await db.commit()
 
 
@@ -224,6 +230,7 @@ async def _record_report(node_id: int, report):
         # which is the safe direction — a held session is a delayed ledger row,
         # while a wrongly-closed one is a wrong invoice.
         await nodesessions.apply_report(db, node_id, payload["ppp"], now)
+        await nodesessions.apply_wg_report(db, node_id, payload["wg"], now)
         await db.commit()
         return node.reconnect_requested_at, node.sync_requested_at
 

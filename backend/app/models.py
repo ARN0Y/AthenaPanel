@@ -231,6 +231,12 @@ class Node(Base):
     #
     # Empty means "use the panel-wide setting". That is what keeps node 1
     # behaving exactly as it does today without copying anything into it.
+    # This node's OWN WireGuard server key and listen port, reported by its
+    # agent. A customer's config must name the key of the machine they actually
+    # connect to; handing out the master's key produces a config that looks
+    # correct and never completes a handshake.
+    wg_public_key: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+
     ext_l2tp_address: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     ext_l2tp_raw_address: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     ext_sstp_address: Mapped[str] = mapped_column(String(255), default="", nullable=False)

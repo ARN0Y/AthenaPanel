@@ -31,6 +31,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/ARN0Y/AthenaPanel/agent/internal/collect"
+	"github.com/ARN0Y/AthenaPanel/agent/internal/enforce"
 	"github.com/ARN0Y/AthenaPanel/agent/internal/hooks"
 	pb "github.com/ARN0Y/AthenaPanel/agent/pb"
 )
@@ -119,7 +120,7 @@ func main() {
 
 	// The engine outlives every stream: a reconnect must not reset anyone's
 	// spent credit, or a network blip would hand out free traffic.
-	engine := newCreditEngine(cfg.chapPath, cfg.chapServer)
+	engine := newCreditEngine(cfg.chapPath, cfg.chapServer, cfg.wgIface)
 	hookSrv := hooks.New(cfg.hookAddr, engine)
 	if err := hookSrv.Start(); err != nil {
 		log.Fatalf("hook endpoint: %v", err)
@@ -199,6 +200,7 @@ func runSession(ctx context.Context, cfg config, engine *creditEngine) error {
 		return fmt.Errorf("open stream: %w", err)
 	}
 
+	wgPub, wgPort := enforce.WgPublicKey(cfg.wgIface)
 	if err := stream.Send(&pb.AgentMessage{
 		Payload: &pb.AgentMessage_Hello{Hello: &pb.Hello{
 			Token:           cfg.token,
@@ -210,6 +212,11 @@ func runSession(ctx context.Context, cfg config, engine *creditEngine) error {
 			HasL2Tp:         collect.PortBound(1701),
 			HasSstp:         collect.PortBound(443),
 			HasWireguard:    cfg.wgIface != "",
+			// The panel builds every customer's WireGuard config from this. It
+			// has to be THIS machine's key: handing out the master's produces a
+			// config that looks right and never completes a handshake.
+			WgPublicKey:  wgPub,
+			WgListenPort: wgPort,
 		}},
 	}); err != nil {
 		return fmt.Errorf("send hello: %w", err)

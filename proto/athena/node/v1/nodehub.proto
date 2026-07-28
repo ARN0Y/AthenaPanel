@@ -114,6 +114,13 @@ message Hello {
   bool has_l2tp = 7;
   bool has_sstp = 8;
   bool has_wireguard = 9;
+  // This node's OWN WireGuard server key. A customer's config must name the
+  // key of the machine they actually connect to, so it cannot be a panel-wide
+  // value — the master's key would produce a config that never handshakes.
+  string wg_public_key = 10;
+  // Where that interface listens, so the panel hands out the right port even
+  // when a node was bootstrapped on a non-default one.
+  uint32 wg_listen_port = 11;
 }
 
 message Report {
@@ -278,6 +285,20 @@ message UserSync {
     string l2tp_mode = 6;
     // "direct" | "warp"
     string outbound = 7;
+    // Every WireGuard peer belonging to this account. Sent with the account
+    // rather than as a separate list so a node can never end up serving a peer
+    // whose owner it does not know — that is what makes the peer's traffic
+    // billable instead of anonymous.
+    repeated WgPeer wg_peers = 8;
+  }
+
+  message WgPeer {
+    string public_key = 1;
+    string preshared_key = 2;
+    // The single /32 this peer is allowed to use, which is also how the node
+    // NATs it. One address per peer: WireGuard has no session, so the address
+    // IS the identity for anything downstream (WARP routing, firewalling).
+    string address = 3;
   }
 
   uint64 sync_id = 1;

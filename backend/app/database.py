@@ -71,6 +71,7 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "usage_samples": [("node_id", "INTEGER NOT NULL DEFAULT 1")],
     "accounting": [("node_id", "INTEGER NOT NULL DEFAULT 1")],
     "nodes": [
+        ("wg_public_key", "VARCHAR(64) NOT NULL DEFAULT ''"),
         ("sync_requested_at", "DATETIME"),
         ("synced_at", "DATETIME"),
         ("ext_l2tp_address", "VARCHAR(255) NOT NULL DEFAULT ''"),
@@ -135,6 +136,7 @@ _PG_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("nodes", "reconnect_requested_at", "TIMESTAMPTZ"),
     ("nodes", "sync_requested_at", "TIMESTAMPTZ"),
     ("nodes", "synced_at", "TIMESTAMPTZ"),
+    ("nodes", "wg_public_key", "VARCHAR(64) NOT NULL DEFAULT ''"),
     ("nodes", "wg_port", "INTEGER NOT NULL DEFAULT 51820"),
     ("nodes", "sstp_port", "INTEGER NOT NULL DEFAULT 443"),
     ("nodes", "l2tp_port", "INTEGER NOT NULL DEFAULT 1701"),

@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from . import chap_secrets, outbound, wireguard
 from .config import settings
 from .database import AsyncSessionLocal, init_db
-from .models import Admin, AppSetting, User, WgPeer
+from .models import LOCAL_NODE_ID, Admin, AppSetting, User, WgPeer
 from .models import Session as SessionRow
 from .routers import (
     admins,
@@ -106,7 +106,24 @@ async def _sync_wireguard() -> None:
         return
     async with AsyncSessionLocal() as db:
         rows = (await db.execute(select(WgPeer, User).join(User, User.id == WgPeer.user_id))).all()
-    peers = [(p.public_key, p.preshared_key, p.address, bool(p.enabled and u.enabled_for_auth)) for p, u in rows]
+    # A peer belonging to a user on ANOTHER node is not this interface's to
+    # hold: that node has it, and putting the same key on two servers would
+    # connect the customer in two places while only one of them billed.
+    # Passed as disabled rather than skipped, so a peer left behind by a move
+    # is actively removed here instead of lingering.
+    peers = [
+        (
+            p.public_key,
+            p.preshared_key,
+            p.address,
+            bool(
+                p.enabled
+                and u.enabled_for_auth
+                and (u.node_id or LOCAL_NODE_ID) == LOCAL_NODE_ID
+            ),
+        )
+        for p, u in rows
+    ]
     if peers:
         n = await wireguard.sync_from_db(peers)
         log.info("wireguard: synced %d/%d peers to %s", n, len(peers), wireguard.IFACE)

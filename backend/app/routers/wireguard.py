@@ -12,11 +12,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import appsettings, audit, wireguard
+from .. import appsettings, audit, nodes as nodes_mod, wireguard
 from ..config import settings
 from ..database import get_session
 from ..deps import get_current_admin
-from ..models import Admin, User, WgPeer
+from ..models import LOCAL_NODE_ID, Admin, Node, User, WgPeer
 
 router = APIRouter(prefix="/api/wireguard", tags=["wireguard"])
 
@@ -98,8 +98,26 @@ async def enable(user_id: int, admin: Admin = Depends(get_current_admin), db: As
     await audit.record(db, "wg_enable", username, actor=admin.username)
     await db.commit()
     await db.refresh(peer)
-    await wireguard.add_peer(pub, psk, address)  # apply to the live interface
+    await _apply_peer(db, user, pub, psk, address)
     return _out(peer)
+
+
+async def _apply_peer(db: AsyncSession, user: User, pub: str, psk: str, address: str) -> None:
+    """Put a new peer where its owner is actually served.
+
+    On node 1 that is this kernel. On any other node it is a message to the
+    hub, which is a separate process — so the channel is the same resync
+    timestamp every other account change uses. Adding it locally as well would
+    put the same key on two servers, and the customer would connect to whichever
+    answered first while only one of them billed.
+    """
+    node_id = user.node_id or LOCAL_NODE_ID
+    if node_id == LOCAL_NODE_ID:
+        await wireguard.add_peer(pub, psk, address)
+        return
+    from .. import nodecredit
+
+    await nodecredit.touch_sync_needed(node_id)
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -107,10 +125,18 @@ async def disable(user_id: int, admin: Admin = Depends(get_current_admin), db: A
     user = await _owned_user(db, admin, user_id)
     peer = await _peer_for(db, user_id)
     if peer:
+        # Removed here unconditionally: even for a user served elsewhere the key
+        # may still be on this interface from before they were moved, and a
+        # revoked key left behind keeps working.
         await wireguard.remove_peer(peer.public_key)
         await db.delete(peer)
         await audit.record(db, "wg_disable", user.username, actor=admin.username)
         await db.commit()
+        node_id = user.node_id or LOCAL_NODE_ID
+        if node_id != LOCAL_NODE_ID:
+            from .. import nodecredit
+
+            await nodecredit.touch_sync_needed(node_id)
     return None
 
 
@@ -122,9 +148,29 @@ async def get_config(user_id: int, admin: Admin = Depends(get_current_admin), db
         raise HTTPException(status_code=404, detail="WireGuard not enabled for this user")
 
     aps = await appsettings.get_all(db)
-    endpoint = (aps.get("wg_endpoint") or settings.wg_endpoint).strip()
-    server_pub = (aps.get("wg_server_pubkey") or settings.wg_server_pubkey).strip() or await wireguard.server_pubkey()
     dns = aps.get("wg_dns") or settings.wg_dns
+
+    # The endpoint AND the server key must both describe the machine this user
+    # actually connects to. Mixing them — the node's endpoint with the master's
+    # key — produces a config that looks completely correct, resolves, sends
+    # handshake initiations, and never gets a reply.
+    node = await db.get(Node, user.node_id or LOCAL_NODE_ID)
+    endpoint = nodes_mod.effective_endpoints(node, aps)["wg"]
+    if node is not None and not node.is_local:
+        server_pub = (node.wg_public_key or "").strip()
+        if not server_pub:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Node '{node.name}' has not reported a WireGuard key yet — "
+                    "its agent is offline, or it was bootstrapped without WireGuard."
+                ),
+            )
+    else:
+        server_pub = (
+            (aps.get("wg_server_pubkey") or settings.wg_server_pubkey).strip()
+            or await wireguard.server_pubkey()
+        )
     if not endpoint:
         raise HTTPException(status_code=400, detail="WG endpoint not set — Settings: set the relay host:port")
     if not server_pub:

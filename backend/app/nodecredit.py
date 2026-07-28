@@ -233,10 +233,26 @@ async def build_sync(node_id: int, sync_id: int):
     diverge silently and nothing would ever notice. At this scale replacing the
     list outright is cheaper than being clever about it.
     """
+    from .models import WgPeer
     from .pb import nodehub_pb2
 
     async with AsyncSessionLocal() as db:
         users = await users_for_node(db, node_id)
+        # Peers travel WITH their account rather than as a separate list, so a
+        # node can never end up holding a key whose owner it does not know —
+        # that is what makes a WireGuard peer's traffic billable instead of
+        # anonymous, and it is why the node refuses to meter one it was not told
+        # about.
+        peers_by_user: dict[int, list[WgPeer]] = {}
+        if users:
+            rows = (
+                await db.execute(
+                    select(WgPeer).where(WgPeer.user_id.in_([u.id for u in users]))
+                )
+            ).scalars().all()
+            for peer in rows:
+                if peer.enabled:
+                    peers_by_user.setdefault(peer.user_id, []).append(peer)
 
     entries = [
         nodehub_pb2.UserSync.Entry(
@@ -247,6 +263,14 @@ async def build_sync(node_id: int, sync_id: int):
             rate_up_kbps=max(0, u.rate_up_kbps or 0),
             l2tp_mode=(u.l2tp_mode or "ipsec"),
             outbound=outbound.normalize(u.outbound),
+            wg_peers=[
+                nodehub_pb2.UserSync.WgPeer(
+                    public_key=p.public_key,
+                    preshared_key=p.preshared_key or "",
+                    address=p.address,
+                )
+                for p in peers_by_user.get(u.id, [])
+            ],
         )
         for u in users
     ]

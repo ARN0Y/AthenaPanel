@@ -24,19 +24,43 @@ type creditEngine struct {
 	led      *ledger.Ledger
 	chapPath string
 	chapSrv  string
+	wgIface  string
 
 	mu     sync.Mutex
 	send   func(*pb.AgentMessage) error // nil while disconnected
 	pollMs int
+	// public key -> account, learned from the last sync. WireGuard reports a
+	// key, never a name, so without this a peer's traffic is unattributable and
+	// therefore unbillable.
+	wgOwners map[string]string
 }
 
-func newCreditEngine(chapPath, chapServerField string) *creditEngine {
+func newCreditEngine(chapPath, chapServerField, wgIface string) *creditEngine {
 	return &creditEngine{
 		led:      ledger.New(),
 		chapPath: chapPath,
 		chapSrv:  chapServerField,
+		wgIface:  wgIface,
 		pollMs:   1000,
+		wgOwners: map[string]string{},
 	}
+}
+
+// wgKey is how a WireGuard peer is named inside the ledger. Prefixed so it can
+// never collide with an interface name, and so termination can tell the two
+// apart: a ppp session is a process to signal, a peer is a key to revoke.
+func wgKey(publicKey string) string { return "wg:" + publicKey }
+
+func (e *creditEngine) wgOwner(publicKey string) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.wgOwners[publicKey]
+}
+
+func (e *creditEngine) setWgOwners(m map[string]string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.wgOwners = m
 }
 
 func (e *creditEngine) attach(send func(*pb.AgentMessage) error, pollMs int) {
@@ -127,19 +151,37 @@ func (e *creditEngine) applyGrant(g *pb.CreditGrant) {
 
 func (e *creditEngine) applySync(s *pb.UserSync) (int, error) {
 	users := make([]enforce.User, 0, len(s.Users))
+	wgPeers := make([]enforce.WgPeer, 0)
+	wgOwners := make(map[string]string)
 	for _, u := range s.Users {
 		users = append(users, enforce.User{
 			Username: u.Username, Password: u.Password, Enabled: u.Enabled,
 			RateDownKbps: u.RateDownKbps, RateUpKbps: u.RateUpKbps,
 			L2tpMode: u.L2TpMode, Outbound: u.Outbound,
 		})
+		// A disabled account's peers are simply left out of the set, which is
+		// the same rule chap-secrets follows — and for WireGuard it is also the
+		// enforcement, since a key that is not on the interface cannot connect.
+		if !u.Enabled {
+			continue
+		}
+		for _, p := range u.WgPeers {
+			wgPeers = append(wgPeers, enforce.WgPeer{
+				PublicKey:    p.PublicKey,
+				PresharedKey: p.PresharedKey,
+				Address:      p.Address,
+			})
+			wgOwners[p.PublicKey] = u.Username
+		}
 	}
 	n, err := enforce.WriteChapSecrets(e.chapPath, e.chapSrv, users)
 	if err != nil {
 		return 0, err
 	}
 	enforce.ReloadAccel()
-	log.Printf("applied sync %d: %d of %d accounts enabled", s.SyncId, n, len(s.Users))
+	wgN := e.applyWgPeers(wgOwners, wgPeers)
+	log.Printf("applied sync %d: %d of %d accounts enabled, %d wireguard peer(s)",
+		s.SyncId, n, len(s.Users), wgN)
 
 	// chap-secrets only decides who may AUTHENTICATE. A user who was deleted,
 	// disabled, or moved to another node is already connected, and rewriting the
@@ -214,6 +256,14 @@ func (e *creditEngine) runCredit(stop <-chan struct{}) {
 		for _, i := range ifaces {
 			counters[i.Ifname] = struct{ Rx, Tx uint64 }{i.RxBytes, i.TxBytes}
 		}
+		// WireGuard peers are billed through the SAME ledger as ppp sessions.
+		// They have no connect or disconnect, so a peer counts as live from its
+		// first handshake and stays live until it goes quiet — anything else
+		// would mean a WireGuard user could exceed their quota indefinitely,
+		// because nothing would ever ask the hub about them.
+		for _, p := range e.observeWg() {
+			counters[wgKey(p.PublicKey)] = struct{ Rx, Tx uint64 }{p.RxBytes, p.TxBytes}
+		}
 		e.led.Observe(counters)
 
 		send, _ := e.sender()
@@ -226,6 +276,7 @@ func (e *creditEngine) runCredit(stop <-chan struct{}) {
 					log.Printf("  disconnect %s: %v (%d killed)", v.Username, err, n)
 				}
 				_ = enforce.DisconnectAccel(v.Username)
+				e.revokeWg(v.Ifnames)
 				// Forget them, or every tick would re-decide the same thing and
 				// re-kill a process that is already gone — a second of log spam
 				// per second, and real work for nothing. If they reconnect the

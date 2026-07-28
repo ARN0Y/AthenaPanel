@@ -94,16 +94,31 @@ export function Sessions() {
         : { key, dir: numericKeys.includes(key) ? "desc" : "asc" },
     );
 
-  // The node column only exists once there is something to distinguish. On a
-  // single-server install every row would say the same word, which is noise
-  // dressed up as information.
+  // Which nodes exist, not which happen to have someone on them right now. A
+  // column that appears and disappears as the last session on a node drops is
+  // worse than one that is always there once a second node is registered —
+  // and an empty node is exactly when an operator wants to see it named.
+  // /api/nodes is superadmin-only, so a reseller gets nothing here. That is not
+  // an error to retry — fall back to whichever nodes their own sessions are on,
+  // which is all they can see anyway.
+  const { data: allNodes = [] } = useQuery({
+    queryKey: ["nodes", "for-sessions"],
+    queryFn: api.listNodes,
+    refetchInterval: 30000,
+    retry: false,
+    throwOnError: false,
+  });
+
   const nodes = React.useMemo(() => {
-    const seen = new Map<number, string>();
-    for (const s of sessions) seen.set(s.node_id, s.node_name || `node ${s.node_id}`);
-    return [...seen.entries()]
+    const known = new Map<number, string>();
+    for (const n of allNodes) known.set(n.id, n.name);
+    for (const s of sessions) {
+      if (!known.has(s.node_id)) known.set(s.node_id, s.node_name || `node ${s.node_id}`);
+    }
+    return [...known.entries()]
       .map(([id, name]) => ({ id, name, n: sessions.filter((s) => s.node_id === id).length }))
       .sort((a, b) => a.id - b.id);
-  }, [sessions]);
+  }, [allNodes, sessions]);
   const multiNode = nodes.length > 1;
 
   // Match on everything visible in a row so "l2tp", "192.168.42", "ppp7", a
@@ -226,8 +241,12 @@ export function Sessions() {
                       key={n.id}
                       type="button"
                       onClick={() => setQuery(query === n.name ? "" : n.name)}
-                      className="rounded px-1 py-0.5 tabular-nums transition-colors hover:bg-muted hover:text-foreground"
-                      title={`Filter to ${n.name}`}
+                      className={cn(
+                        "rounded px-1 py-0.5 tabular-nums transition-colors hover:bg-muted hover:text-foreground",
+                        query === n.name && "bg-muted text-foreground",
+                        n.n === 0 && "opacity-50",
+                      )}
+                      title={n.n ? `Filter to ${n.name}` : `${n.name} has nobody connected`}
                     >
                       {n.name} <span className="font-medium">{n.n}</span>
                     </button>

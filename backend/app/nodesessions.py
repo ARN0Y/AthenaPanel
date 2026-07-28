@@ -31,7 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import pppd
-from .models import Session as SessionRow, User
+from .models import Session as SessionRow, User, WgPeer
 
 log = logging.getLogger("vpn-panel.nodesessions")
 
@@ -39,6 +39,11 @@ log = logging.getLogger("vpn-panel.nodesessions")
 # statement. Matches the enforcer's debounce for local interfaces on purpose:
 # "gone" should not mean something different depending on which node you are on.
 GONE_REPORTS_BEFORE_CLOSE = 2
+
+# A WireGuard peer counts as connected while its last handshake is this recent.
+# Same value as tasks.WG_ONLINE_WINDOW, and for the same reason: WireGuard
+# rekeys about every two minutes, so a shorter window makes a healthy peer flap.
+WG_ONLINE_WINDOW = 180
 
 
 async def _note_new_session(db: AsyncSession, username: str, now: datetime) -> None:
@@ -65,7 +70,14 @@ async def apply_report(
     rows = {
         r.ifname: r
         for r in (
-            await db.execute(select(SessionRow).where(SessionRow.node_id == node_id))
+            await db.execute(
+                # WireGuard rows live in the same table but are reconciled
+                # against a different part of the report; sweeping them here
+                # would delete every peer two reports after it appeared.
+                select(SessionRow).where(
+                    SessionRow.node_id == node_id, SessionRow.proto != "wg"
+                )
+            )
         ).scalars().all()
     }
     seen: set[str] = set()
@@ -157,6 +169,112 @@ async def apply_report(
                 node_id, row.username or "?", ifname,
             )
             await db.delete(row)
+
+
+async def apply_wg_report(
+    db: AsyncSession, node_id: int, peers: list[dict], now: datetime
+) -> None:
+    """Fold a node's WireGuard peers into the same rows its ppp sessions use.
+
+    WireGuard has no connect or disconnect, so "online" is inferred from the
+    handshake — the same rule the master applies to its own peers. A peer that
+    has handshaken recently gets a session row; one that has gone quiet loses
+    it. Doing anything else would leave WireGuard as the one protocol that is
+    invisible on the Sessions page the moment it moves off node 1.
+
+    Attribution is by public key against `wg_peers`, which only matches keys the
+    PANEL issued. A peer somebody put on the node by hand is deliberately left
+    alone: it is counted on the node card from the report, but inventing a
+    session for traffic that belongs to nobody would be worse than omitting it.
+
+    Bytes are not billed here. Like ppp, a remote peer's traffic is billed by
+    the credit loop as it is spent; these rows are display and ownership only.
+    """
+    reported = {
+        (p.get("public_key") or ""): p for p in peers if p.get("public_key")
+    }
+    rows = {
+        r.ifname: r
+        for r in (
+            await db.execute(
+                select(SessionRow).where(
+                    SessionRow.node_id == node_id, SessionRow.proto == "wg"
+                )
+            )
+        ).scalars().all()
+    }
+
+    owners: dict[str, tuple[str, str]] = {}
+    if reported:
+        found = (
+            await db.execute(
+                select(WgPeer.public_key, WgPeer.address, User.username)
+                .join(User, User.id == WgPeer.user_id)
+                .where(WgPeer.public_key.in_(list(reported)))
+            )
+        ).all()
+        owners = {pk: (username, address) for pk, address, username in found}
+
+    seen: set[str] = set()
+    for public_key, entry in reported.items():
+        owner = owners.get(public_key)
+        if owner is None:
+            continue
+        username, address = owner
+        ifname = _wg_ifname(address)
+        seen.add(ifname)
+        handshake = int(entry.get("last_handshake_unix") or 0)
+        online = handshake > 0 and (now.timestamp() - handshake) < WG_ONLINE_WINDOW
+        rx = max(0, int(entry.get("rx_bytes") or 0))
+        tx = max(0, int(entry.get("tx_bytes") or 0))
+        row = rows.get(ifname)
+
+        if not online:
+            if row is not None:
+                await db.delete(row)
+            continue
+        if row is None:
+            # A new online period. The base is the counter as it stands, so the
+            # previous period's bytes are not shown as part of this one — the
+            # same anchoring the master's enforcer does with session_base_rx.
+            db.add(
+                SessionRow(
+                    node_id=node_id,
+                    username=username,
+                    ifname=ifname,
+                    peer_ip=address,
+                    pid=0,
+                    proto="wg",
+                    base_rx=rx,
+                    base_tx=tx,
+                    last_rx=rx,
+                    last_tx=tx,
+                )
+            )
+            await _note_new_session(db, username, now)
+            log.info("node %d: wireguard %s is up (%s)", node_id, username, address)
+            continue
+        if rx < row.last_rx or tx < row.last_tx:
+            # The peer was re-added, so its counters restarted. Re-anchor rather
+            # than let the difference go negative.
+            row.base_rx = row.base_tx = 0
+            row.started_at = now
+        row.username = username
+        row.last_rx, row.last_tx = rx, tx
+        row.gone_polls = 0
+        row.stale_since = None
+
+    for ifname, row in rows.items():
+        if ifname not in seen:
+            # The panel still has the peer but the node no longer reports it —
+            # it was revoked there, or moved to another node.
+            await db.delete(row)
+
+
+def _wg_ifname(address: str) -> str:
+    """Session key for a WireGuard peer. Matches what the master's snapshot
+    uses (`wg:<address>`) so the Sessions page reads identically on any node."""
+    return f"wg:{address}"[:32]
 
 
 async def close_session(

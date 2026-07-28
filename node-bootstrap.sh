@@ -56,7 +56,7 @@ export DEBIAN_FRONTEND=noninteractive
 PKGS="iptables"
 [ "$WANT_L2TP" = 1 ] && PKGS="$PKGS xl2tpd ppp libreswan"
 [ "$WANT_SSTP" = 1 ] && PKGS="$PKGS accel-ppp"
-[ "$WANT_WG" = 1 ]   && PKGS="$PKGS wireguard-tools"
+[ "$WANT_WG" = 1 ]   && PKGS="$PKGS wireguard-tools wireguard"
 apt-get update -qq >/dev/null 2>&1 || warn "apt update failed; continuing with what is cached"
 # --no-install-recommends keeps a small node small; none of the recommends are
 # needed to terminate a session.
@@ -98,6 +98,46 @@ curl -s -m 3 -X POST "http://127.0.0.1:8711/session-down" \
 exit 0
 EOF
 chmod 0755 /etc/ppp/ip-up.d/athena /etc/ppp/ip-down.d/athena
+
+WG_IFACE="${WG_IFACE:-wg-panel}"
+WG_PORT="${WG_PORT:-51820}"
+WG_ADDR="${WG_ADDR:-10.66.66.1/24}"
+if [ "$WANT_WG" = 1 ]; then
+    log "wireguard interface $WG_IFACE"
+    # PEERS ARE NOT WRITTEN HERE. The interface is infrastructure and belongs to
+    # the machine; the peer list belongs to the panel and arrives over the
+    # control stream, so the agent applies it and can revoke a key the moment
+    # credit runs out. A peer written into a config file could only be changed
+    # by re-running this script.
+    install -d -m 0700 /etc/wireguard
+    if [ ! -s "/etc/wireguard/$WG_IFACE.key" ]; then
+        umask 077
+        wg genkey > "/etc/wireguard/$WG_IFACE.key"
+        log "  generated a new server key"
+    fi
+    wg pubkey < "/etc/wireguard/$WG_IFACE.key" > "/etc/wireguard/$WG_IFACE.pub"
+    cat > "/etc/wireguard/$WG_IFACE.conf" <<EOF
+# Managed by node-bootstrap.sh. Peers are pushed by the panel, not written here.
+[Interface]
+Address = $WG_ADDR
+ListenPort = $WG_PORT
+PrivateKey = $(cat "/etc/wireguard/$WG_IFACE.key")
+EOF
+    chmod 600 "/etc/wireguard/$WG_IFACE.conf" "/etc/wireguard/$WG_IFACE.key"
+    systemctl enable "wg-quick@$WG_IFACE" >/dev/null 2>&1 || true
+    # restart, not start: wg-quick is a oneshot that reports "active (exited)"
+    # once it has run, so start is a no-op on a stale interface. That exact
+    # mistake kept a dead WARP tunnel "healthy" for nine days.
+    systemctl restart "wg-quick@$WG_IFACE" || warn "wg-quick@$WG_IFACE failed to start"
+    printf '  server key: %s\n' "$(cat "/etc/wireguard/$WG_IFACE.pub")"
+    grep -q "^ATHENA_WG_IFACE=" /etc/athena-agent.env 2>/dev/null \
+        || echo "ATHENA_WG_IFACE=$WG_IFACE" >> /etc/athena-agent.env
+else
+    # An agent told to watch an interface that does not exist would report a
+    # WireGuard capability this node cannot serve.
+    grep -q "^ATHENA_WG_IFACE=" /etc/athena-agent.env 2>/dev/null \
+        || echo "ATHENA_WG_IFACE=" >> /etc/athena-agent.env
+fi
 
 log "egress NAT"
 WAN=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'dev \K\S+' | head -1)

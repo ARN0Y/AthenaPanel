@@ -372,6 +372,20 @@ func (l *Ledger) Pids(username string) []int32 {
 	return out
 }
 
+// HasSession reports whether a user already holds this interface (or, for
+// WireGuard, this key). Lets a poller tell "already tracked" from "new" without
+// re-anchoring the baseline of something that was fine.
+func (l *Ledger) HasSession(username, ifname string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	u, ok := l.users[username]
+	if !ok {
+		return false
+	}
+	_, ok = u.sessions[ifname]
+	return ok
+}
+
 // SessionCount is how many live interfaces a user holds. Zero for a name that
 // is tracked but not currently connected — and a session with no usable pid
 // (accel-ppp owns its own) still counts, because it is still a live session.

@@ -271,6 +271,14 @@ async def _enforce_once() -> None:
             user = wg_users.get(peer.user_id)
             if user is None:
                 continue
+            if (user.node_id or LOCAL_NODE_ID) != LOCAL_NODE_ID:
+                # Served by another node, which holds this peer on ITS interface
+                # and enforces it through the credit loop. Re-adding it here
+                # would put the same key on two servers, so the customer would
+                # be connected in two places and only one of them would bill.
+                # (Kicking is not needed either: the peer is not on this iface,
+                # so `on_iface` is already false.)
+                continue
             ppp_live = sum(
                 sum(pppd.session_usage(r.last_rx, r.last_tx, r.base_rx, r.base_tx))
                 for r in active_rows_by_user.get(user.username, [])
@@ -417,13 +425,20 @@ async def _remote_sessions(db, now: datetime) -> list:
         # base, multiplier applied. A row cannot display more than the credit
         # loop has billed for it.
         in_b, out_b = pppd.session_usage(row.last_rx, row.last_tx, row.base_rx, row.base_tx)
+        # "wg" is the one proto the address pool cannot identify — a WireGuard
+        # peer's address comes from the panel's own pool, not from an engine's,
+        # so classify_proto would guess L2TP from it.
+        protocol = (
+            "WireGuard" if row.proto == "wg"
+            else pppd.classify_proto(row.peer_ip, row.proto)
+        )
         out.append(SessionOut(
             username=row.username,
             ifname=row.ifname,
             ip=row.peer_ip,
             node_id=row.node_id,
             node_name=remote_nodes[row.node_id].name,
-            protocol=pppd.classify_proto(row.peer_ip, row.proto),
+            protocol=protocol,
             uptime_seconds=_duration(row.started_at, now),
             rx_bytes=in_b,
             tx_bytes=out_b,

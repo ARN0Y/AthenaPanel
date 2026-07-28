@@ -19,7 +19,7 @@ class AgentMessage(_message.Message):
     def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., report: _Optional[_Union[Report, _Mapping]] = ..., credit_request: _Optional[_Union[CreditRequest, _Mapping]] = ..., sync_ack: _Optional[_Union[SyncAck, _Mapping]] = ...) -> None: ...
 
 class Hello(_message.Message):
-    __slots__ = ("token", "agent_version", "protocol_version", "hostname", "os", "kernel", "has_l2tp", "has_sstp", "has_wireguard")
+    __slots__ = ("token", "agent_version", "protocol_version", "hostname", "os", "kernel", "has_l2tp", "has_sstp", "has_wireguard", "wg_public_key", "wg_listen_port")
     TOKEN_FIELD_NUMBER: _ClassVar[int]
     AGENT_VERSION_FIELD_NUMBER: _ClassVar[int]
     PROTOCOL_VERSION_FIELD_NUMBER: _ClassVar[int]
@@ -29,6 +29,8 @@ class Hello(_message.Message):
     HAS_L2TP_FIELD_NUMBER: _ClassVar[int]
     HAS_SSTP_FIELD_NUMBER: _ClassVar[int]
     HAS_WIREGUARD_FIELD_NUMBER: _ClassVar[int]
+    WG_PUBLIC_KEY_FIELD_NUMBER: _ClassVar[int]
+    WG_LISTEN_PORT_FIELD_NUMBER: _ClassVar[int]
     token: str
     agent_version: str
     protocol_version: int
@@ -38,7 +40,9 @@ class Hello(_message.Message):
     has_l2tp: bool
     has_sstp: bool
     has_wireguard: bool
-    def __init__(self, token: _Optional[str] = ..., agent_version: _Optional[str] = ..., protocol_version: _Optional[int] = ..., hostname: _Optional[str] = ..., os: _Optional[str] = ..., kernel: _Optional[str] = ..., has_l2tp: bool = ..., has_sstp: bool = ..., has_wireguard: bool = ...) -> None: ...
+    wg_public_key: str
+    wg_listen_port: int
+    def __init__(self, token: _Optional[str] = ..., agent_version: _Optional[str] = ..., protocol_version: _Optional[int] = ..., hostname: _Optional[str] = ..., os: _Optional[str] = ..., kernel: _Optional[str] = ..., has_l2tp: bool = ..., has_sstp: bool = ..., has_wireguard: bool = ..., wg_public_key: _Optional[str] = ..., wg_listen_port: _Optional[int] = ...) -> None: ...
 
 class Report(_message.Message):
     __slots__ = ("sent_at_unix_ms", "host", "ppp", "wg", "ppp_scan_failed")
@@ -217,7 +221,7 @@ class CreditGrant(_message.Message):
 class UserSync(_message.Message):
     __slots__ = ("sync_id", "users", "full")
     class Entry(_message.Message):
-        __slots__ = ("username", "password", "enabled", "rate_down_kbps", "rate_up_kbps", "l2tp_mode", "outbound")
+        __slots__ = ("username", "password", "enabled", "rate_down_kbps", "rate_up_kbps", "l2tp_mode", "outbound", "wg_peers")
         USERNAME_FIELD_NUMBER: _ClassVar[int]
         PASSWORD_FIELD_NUMBER: _ClassVar[int]
         ENABLED_FIELD_NUMBER: _ClassVar[int]
@@ -225,6 +229,7 @@ class UserSync(_message.Message):
         RATE_UP_KBPS_FIELD_NUMBER: _ClassVar[int]
         L2TP_MODE_FIELD_NUMBER: _ClassVar[int]
         OUTBOUND_FIELD_NUMBER: _ClassVar[int]
+        WG_PEERS_FIELD_NUMBER: _ClassVar[int]
         username: str
         password: str
         enabled: bool
@@ -232,7 +237,17 @@ class UserSync(_message.Message):
         rate_up_kbps: int
         l2tp_mode: str
         outbound: str
-        def __init__(self, username: _Optional[str] = ..., password: _Optional[str] = ..., enabled: bool = ..., rate_down_kbps: _Optional[int] = ..., rate_up_kbps: _Optional[int] = ..., l2tp_mode: _Optional[str] = ..., outbound: _Optional[str] = ...) -> None: ...
+        wg_peers: _containers.RepeatedCompositeFieldContainer[UserSync.WgPeer]
+        def __init__(self, username: _Optional[str] = ..., password: _Optional[str] = ..., enabled: bool = ..., rate_down_kbps: _Optional[int] = ..., rate_up_kbps: _Optional[int] = ..., l2tp_mode: _Optional[str] = ..., outbound: _Optional[str] = ..., wg_peers: _Optional[_Iterable[_Union[UserSync.WgPeer, _Mapping]]] = ...) -> None: ...
+    class WgPeer(_message.Message):
+        __slots__ = ("public_key", "preshared_key", "address")
+        PUBLIC_KEY_FIELD_NUMBER: _ClassVar[int]
+        PRESHARED_KEY_FIELD_NUMBER: _ClassVar[int]
+        ADDRESS_FIELD_NUMBER: _ClassVar[int]
+        public_key: str
+        preshared_key: str
+        address: str
+        def __init__(self, public_key: _Optional[str] = ..., preshared_key: _Optional[str] = ..., address: _Optional[str] = ...) -> None: ...
     SYNC_ID_FIELD_NUMBER: _ClassVar[int]
     USERS_FIELD_NUMBER: _ClassVar[int]
     FULL_FIELD_NUMBER: _ClassVar[int]
