@@ -2,7 +2,9 @@ syntax = "proto3";
 
 // Control-plane contract between the panel (hub) and a termination node.
 //
-// Two rules this file exists to enforce, both learned before it was written:
+// ============================================================================
+// THE FOUR RULES THIS FILE EXISTS TO ENFORCE
+// ============================================================================
 //
 //  1. THE NODE DIALS OUT. The hub never connects to a node. A node may sit
 //     behind NAT, change address, or have its IP burned and replaced; none of
@@ -13,20 +15,75 @@ syntax = "proto3";
 //     watermark and computes the difference itself. A resent report is then a
 //     no-op instead of double-counting, and a dropped one heals on the next
 //     report instead of losing traffic forever. This is the single most
-//     important property of the protocol -- deltas over an unreliable link
+//     important property of the protocol — deltas over an unreliable link
 //     silently corrupt billing.
 //
-// The stream is bidirectional from day one even though the hub only replies
-// with acks today: Phase 2 adds commands (disconnect, sync users, quota
-// credit) as new variants of HubMessage.payload, which old agents ignore and
-// new ones handle. Fields are only ever added, never renumbered or reused.
+//  3. QUOTA IS ENFORCED ON THE NODE, NOT BY THE HUB. Asking the hub before
+//     every byte is impossible; polling the hub every 30s means a user on a
+//     100 Mbps line overshoots by ~375 MB. The hub instead GRANTS a bounded
+//     amount of traffic and the node counts it down locally, at a resolution
+//     it chooses. Overshoot then equals (local poll interval x line rate),
+//     which at 1s and a rate-limited user is single-digit megabytes.
+//
+//  4. THE GRANT IS ALSO THE FAILURE BUDGET. If the hub becomes unreachable, a
+//     node can serve at most the credit it already holds. There is no choice
+//     to make between "cut everyone off on a hiccup" and "lose unbounded
+//     traffic" — the grant size IS the risk, chosen deliberately per user.
+//
+// ============================================================================
+// CREDIT CONTROL
+// ============================================================================
+//
+// The credit mechanism is deliberately modelled on RFC 4006 (Diameter
+// Credit-Control), which is the standard telecoms answer to exactly this
+// problem: prepaid quota spent at distributed enforcement points that cannot
+// consult the authority per packet. The names below map onto it directly so
+// anyone who knows the RFC can read this without a translation table:
+//
+//   RFC 4006                      here
+//   ------------------------------------------------------------------
+//   Granted-Service-Unit          CreditGrant.granted_bytes
+//   Volume-Quota-Threshold        CreditGrant.threshold_bytes
+//   Validity-Time                 CreditGrant.validity_seconds
+//   Final-Unit-Indication         CreditGrant.final
+//   Final-Unit-Action TERMINATE   the node disconnects at exhaustion
+//   CCR-Update                    CreditRequest with reason=THRESHOLD/VALIDITY
+//   CCR-Termination               CreditRequest with reason=SESSION_ENDED
+//   Credit-Control-Failure-...    CreditGrant.on_hub_unreachable
+//
+// The lifecycle, straight from the RFC's state machine:
+//
+//   session starts -> node asks for credit (INITIAL)
+//   hub grants N bytes, threshold T, validity V
+//   node counts down locally
+//     consumed >= N - T ......... ask again (THRESHOLD) — early, so that a slow
+//                                 answer does not interrupt a paying customer
+//     V elapses ................. ask again (VALIDITY) — reconciles an idle
+//                                 user and proves the link still works
+//     consumed >= N and final ... disconnect NOW, no further asking
+//     consumed >= N and !final .. apply on_hub_unreachable
+//   session ends .............. report final usage (SESSION_ENDED)
+//
+// The last grant before a user's quota runs out is exact and carries final=true,
+// so the only overshoot that ever reaches the customer's bill is one poll
+// interval of traffic — not one grant.
+//
+// ============================================================================
+// COMPATIBILITY
+// ============================================================================
+//
+// Fields are only ever added, never renumbered or reused. New HubMessage
+// variants are ignored by older agents, which is what lets a node run an old
+// binary for weeks without breaking. protocol_version is bumped ONLY for a
+// change that an old agent would misread rather than ignore.
 
 package athena.node.v1;
 
 option go_package = "github.com/ARN0Y/AthenaPanel/agent/pb;pb";
 
 service NodeHub {
-  // Opened once by the agent and held open. Reports flow up, commands down.
+  // Opened once by the agent and held open. Reports and credit requests flow
+  // up, grants and commands flow down.
   rpc Connect(stream AgentMessage) returns (stream HubMessage);
 }
 
@@ -34,8 +91,10 @@ service NodeHub {
 
 message AgentMessage {
   oneof payload {
-    Hello hello = 1;   // exactly once, first
-    Report report = 2; // then periodically, forever
+    Hello hello = 1;                   // exactly once, first
+    Report report = 2;                 // then periodically, forever
+    CreditRequest credit_request = 3;  // whenever a session needs credit
+    SyncAck sync_ack = 4;              // result of applying a UserSync
   }
 }
 
@@ -50,6 +109,11 @@ message Hello {
   string hostname = 4;
   string os = 5;
   string kernel = 6;
+  // What this node can actually terminate. A node that runs only WireGuard
+  // should never be sent L2TP accounts.
+  bool has_l2tp = 7;
+  bool has_sstp = 8;
+  bool has_wireguard = 9;
 }
 
 message Report {
@@ -57,6 +121,11 @@ message Report {
   Host host = 2;
   repeated PppSession ppp = 3;
   repeated WgPeer wg = 4;
+  // Set when the interface scan itself failed. The hub must then treat the
+  // session list as UNKNOWN rather than empty — an empty list from a failed
+  // scan is indistinguishable from "everybody disconnected", and acting on
+  // that difference is how sessions get finalized and billed twice.
+  bool ppp_scan_failed = 5;
 }
 
 message Host {
@@ -83,6 +152,7 @@ message PppSession {
   string username = 4;
   string peer_ip = 5;
   int32 pid = 6;       // meaningful ONLY on the node that reported it
+  int64 started_at_unix = 7;
 }
 
 // One WireGuard peer. ABSOLUTE counters since the peer was added.
@@ -94,12 +164,52 @@ message WgPeer {
   string address = 5;
 }
 
+// Asks for credit to keep serving a user. Always carries the usage consumed
+// so far, so a request doubles as a usage report and the two can never
+// disagree about what has been spent.
+message CreditRequest {
+  enum Reason {
+    INITIAL = 0;        // session just started, no credit held
+    THRESHOLD = 1;      // consumed past threshold, asking before running out
+    VALIDITY = 2;       // validity elapsed; reconcile even though credit remains
+    SESSION_ENDED = 3;  // final report, no more credit wanted
+    EXHAUSTED = 4;      // ran out before an answer arrived; asking once more
+  }
+
+  string username = 1;
+  Reason reason = 2;
+  // Consumed under the CURRENT grant, in bytes. Reset by the agent each time a
+  // new grant is applied, so it is always relative to grant_id — which makes a
+  // duplicate delivery harmless.
+  uint64 consumed_bytes = 3;
+  // Which grant this consumption belongs to. A request quoting a grant the hub
+  // has already superseded is stale and its consumption is dropped rather than
+  // applied twice.
+  uint64 grant_id = 4;
+  // Absolute counters of the session behind this request, so the hub can
+  // cross-check the credit ledger against the traffic ledger and notice drift
+  // instead of trusting one of them blindly.
+  uint64 session_rx_bytes = 5;
+  uint64 session_tx_bytes = 6;
+  string ifname = 7;
+}
+
+message SyncAck {
+  uint64 sync_id = 1;
+  bool ok = 2;
+  string detail = 3;
+  uint32 users_applied = 4;
+}
+
 // ---------------------------------------------------------------- hub -> agent
 
 message HubMessage {
   oneof payload {
     Welcome welcome = 1;
     Ack ack = 2;
+    CreditGrant credit_grant = 3;
+    UserSync user_sync = 4;
+    Disconnect disconnect = 5;
   }
 }
 
@@ -108,10 +218,77 @@ message Welcome {
   string node_name = 2;
   uint32 report_interval_seconds = 3;
   uint32 protocol_version = 4;
+  // How often the node should sample its own interfaces for credit purposes.
+  // This is the knob that sets accuracy: overshoot is bounded by this interval
+  // times the user's line rate. Separate from report_interval_seconds, which
+  // only governs telemetry sent upstream.
+  uint32 credit_poll_ms = 5;
 }
 
 message Ack {
   int64 received_at_unix_ms = 1;
   bool ok = 2;
   string detail = 3;
+}
+
+// Authority to keep serving a user for a bounded amount of traffic.
+message CreditGrant {
+  enum FailureAction {
+    // Keep serving on the credit already held, then stop. The grant is the
+    // budget; this is the default because cutting a paying customer off over a
+    // brief control-plane hiccup is worse than the bounded loss.
+    CONTINUE_THEN_TERMINATE = 0;
+    // Stop the moment the hub is unreachable, without spending the rest.
+    TERMINATE_IMMEDIATELY = 1;
+  }
+
+  string username = 1;
+  uint64 grant_id = 2;
+  // Bytes the node may serve before it must ask again. Counted from zero at
+  // the moment the grant is applied.
+  uint64 granted_bytes = 3;
+  // Ask for more once this much of the grant remains. Chosen so the round trip
+  // completes before the customer would have been interrupted.
+  uint64 threshold_bytes = 4;
+  // Re-ask after this long even if the traffic threshold is never reached, so
+  // an idle session still reconciles and a dead link is noticed.
+  uint32 validity_seconds = 5;
+  // These are the user's LAST bytes. The node terminates at exhaustion and does
+  // not ask again. Only ever set when the remaining quota fits in one grant, so
+  // the overshoot a customer can see is one poll interval, not one grant.
+  bool final = 6;
+  FailureAction on_hub_unreachable = 7;
+  // Zero means "no credit": the hub is refusing service for this user (expired,
+  // disabled, over quota, wrong node). The node disconnects them at once.
+  bool refused = 8;
+  string refuse_reason = 9;
+}
+
+// The set of accounts this node should accept. Sent whole rather than as a
+// diff: a node that missed an update would otherwise diverge silently, and the
+// list is small enough that idempotent replacement is cheaper than being clever.
+message UserSync {
+  message Entry {
+    string username = 1;
+    string password = 2;
+    bool enabled = 3;
+    uint32 rate_down_kbps = 4;
+    uint32 rate_up_kbps = 5;
+    // "ipsec" | "raw" — which L2TP endpoint this account may use.
+    string l2tp_mode = 6;
+    // "direct" | "warp"
+    string outbound = 7;
+  }
+
+  uint64 sync_id = 1;
+  repeated Entry users = 2;
+  // True when this is the complete list. A partial sync is not currently sent;
+  // the field exists so adding one later cannot be mistaken for a full one.
+  bool full = 3;
+}
+
+// Drop a user's sessions now.
+message Disconnect {
+  string username = 1;
+  string reason = 2;
 }
