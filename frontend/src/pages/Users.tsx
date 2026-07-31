@@ -13,6 +13,10 @@ import {
   Pencil,
   Plus,
   RotateCcw,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
   Search,
   Server,
   Trash2,
@@ -24,6 +28,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Select,
   SelectContent,
@@ -56,10 +61,57 @@ import { formatDate, formatRate, relativeTime } from "@/lib/format";
 import { copyText } from "@/lib/clipboard";
 import { isRawMode, profileText } from "@/lib/profile";
 import { useAuth } from "@/hooks/useAuth";
+import { cn } from "@/lib/utils";
 
 type SortKey = "created_at" | "username" | "used_bytes" | "last_seen" | "expires_at" | "rate_down_kbps";
 type StatusFilter = "all" | "online" | "offline" | "disabled" | "expired";
-const PAGE_SIZE = 12;
+// Twelve was an arbitrary number that made an operator with a hundred accounts
+// page constantly. Twenty fills a laptop screen; the rest is their choice.
+const PAGE_SIZES = [20, 50, 100] as const;
+
+/** A stable colour per account, derived from the name.
+ *
+ *  Every username here looks like "Mgh10xx", so a list of them is a wall of
+ *  near-identical strings. A colour the operator's eye can latch onto turns
+ *  "find that row again" from reading into recognising — and deriving it from
+ *  the name means it never changes, which is the only reason it works. */
+const AVATAR_TONES = [
+  "bg-sky-500/15 text-sky-300",
+  "bg-violet-500/15 text-violet-300",
+  "bg-emerald-500/15 text-emerald-300",
+  "bg-amber-500/15 text-amber-300",
+  "bg-rose-500/15 text-rose-300",
+  "bg-cyan-500/15 text-cyan-300",
+  "bg-fuchsia-500/15 text-fuchsia-300",
+  "bg-lime-500/15 text-lime-300",
+];
+
+function Identicon({ name, online }: { name: string; online: boolean }) {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+  const tone = AVATAR_TONES[hash % AVATAR_TONES.length];
+  // First character + last, not the first two. Real accounts here are named
+  // "Mgh1074", "Mgh1073" — identical until the end — while a name like "yasmin"
+  // is identical to "nazanin" at the end. Taking one from each end tells both
+  // kinds apart; either alone collides on one of them.
+  const clean = name.replace(/[^A-Za-z0-9]/g, "");
+  const label = (clean.length > 1 ? clean[0] + clean[clean.length - 1] : clean || "?").toUpperCase();
+  return (
+    <span className="relative shrink-0">
+      <span
+        className={cn(
+          "flex h-8 w-8 items-center justify-center rounded-lg text-[11px] font-semibold tabular-nums",
+          tone,
+        )}
+      >
+        {label}
+      </span>
+      {online && (
+        <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-card bg-success" />
+      )}
+    </span>
+  );
+}
 
 function matchesStatus(u: User, f: StatusFilter): boolean {
   switch (f) {
@@ -93,6 +145,7 @@ export function Users() {
   const [sortKey, setSortKey] = React.useState<SortKey>("created_at");
   const [sortDir, setSortDir] = React.useState<"asc" | "desc">("desc");
   const [page, setPage] = React.useState(0);
+  const [pageSize, setPageSize] = React.useState<number>(PAGE_SIZES[0]);
   const [selected, setSelected] = React.useState<Set<number>>(new Set());
   const [formOpen, setFormOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<User | null>(null);
@@ -167,8 +220,12 @@ export function Users() {
     return list;
   }, [users, status, creator, outbound, search, sortKey, sortDir]);
 
-  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const current = filtered.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const current = filtered.slice(page * pageSize, page * pageSize + pageSize);
+  // The row number is the position in the WHOLE filtered set, not on this page.
+  // A number that restarts at 1 every page is decoration; one that does not is
+  // something an operator can actually refer to.
+  const firstRowNumber = page * pageSize + 1;
 
   // `creator` and `outbound` belong here too: changing a filter while on page 3
   // used to leave you on page 3 of a now-shorter list, i.e. staring at an empty
@@ -381,79 +438,172 @@ export function Users() {
             </div>
           )}
 
+          <div className="overflow-x-auto">
           <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-10">
-                  <Checkbox checked={allChecked} onCheckedChange={toggleAll} />
+            {/* Sticky, because twenty rows means the operator is scrolling and a
+                column they cannot see is a column they have to guess at. */}
+            <TableHeader className="sticky top-0 z-10 bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/80">
+              <TableRow className="hover:bg-transparent">
+                <TableHead className="w-[52px] pl-4">
+                  <div className="flex items-center">
+                    <Checkbox
+                      checked={allChecked}
+                      onCheckedChange={toggleAll}
+                      aria-label="Select every user on this page"
+                    />
+                  </div>
                 </TableHead>
                 <SortHead k="username">User</SortHead>
                 <TableHead>Status</TableHead>
-                <SortHead k="used_bytes" className="min-w-[170px]">Quota</SortHead>
-                <SortHead k="rate_down_kbps">Speed ↓/↑</SortHead>
-                <SortHead k="last_seen">Last seen</SortHead>
-                <SortHead k="expires_at">Expiry</SortHead>
-                <SortHead k="created_at">Created</SortHead>
-                <TableHead className="w-10" />
+                <SortHead k="used_bytes" className="min-w-[190px]">Quota</SortHead>
+                <SortHead k="rate_down_kbps" className="text-right">Speed</SortHead>
+                <SortHead k="last_seen" className="text-right">Last seen</SortHead>
+                <SortHead k="expires_at" className="text-right">Expiry</SortHead>
+                <SortHead k="created_at" className="text-right">Created</SortHead>
+                <TableHead className="w-12 pr-4" />
               </TableRow>
             </TableHeader>
             <TableBody>
-              {isLoading && (
-                <TableRow><TableCell colSpan={9} className="py-10 text-center text-muted-foreground">Loading…</TableCell></TableRow>
-              )}
+              {isLoading &&
+                Array.from({ length: 6 }).map((_, i) => (
+                  <TableRow key={`sk-${i}`} className="hover:bg-transparent">
+                    <TableCell colSpan={9} className="py-3">
+                      <Skeleton className="h-9 w-full" />
+                    </TableCell>
+                  </TableRow>
+                ))}
               {!isLoading && current.length === 0 && (
-                <TableRow><TableCell colSpan={9} className="py-10 text-center text-muted-foreground">No users match your filters.</TableCell></TableRow>
+                <TableRow className="hover:bg-transparent">
+                  <TableCell colSpan={9} className="py-16 text-center">
+                    <div className="mx-auto flex max-w-sm flex-col items-center gap-2">
+                      <div className="flex h-11 w-11 items-center justify-center rounded-full bg-muted">
+                        <Search className="h-5 w-5 text-muted-foreground" />
+                      </div>
+                      <p className="text-sm font-medium">No users match your filters</p>
+                      <p className="text-xs text-muted-foreground">
+                        Try clearing the search or widening the status filter.
+                      </p>
+                    </div>
+                  </TableCell>
+                </TableRow>
               )}
-              {current.map((u) => (
+              {current.map((u, i) => (
                 <TableRow
                   key={u.id}
                   data-state={selected.has(u.id) ? "selected" : undefined}
-                  className="cursor-pointer"
+                  className={cn(
+                    "group cursor-pointer border-l-2 transition-colors",
+                    // Conditional, not a data-[state] variant stacked on a base
+                    // colour: two border-l-* utilities on one element leave the
+                    // winner up to stylesheet order, and the accent silently
+                    // never appeared.
+                    selected.has(u.id) ? "border-l-primary" : "border-l-transparent",
+                  )}
                   onClick={() => navigate(`/users/${u.id}`)}
                 >
-                  <TableCell onClick={(e) => e.stopPropagation()}>
-                    <Checkbox checked={selected.has(u.id)} onCheckedChange={() => toggleOne(u.id)} />
+                  {/* Number by default, checkbox on hover or once selected. The
+                      operator gets a row they can refer to AND selection, in
+                      one column instead of two. */}
+                  <TableCell className="pl-4" onClick={(e) => e.stopPropagation()}>
+                    <div className="relative flex h-5 w-5 items-center justify-center">
+                      {/* Exactly one opacity utility per state. Giving an element
+                          both opacity-0 and opacity-100 and letting a variant
+                          decide leaves the winner to stylesheet order — which is
+                          how the checkbox ended up invisible on a selected row. */}
+                      <span
+                        className={cn(
+                          "absolute text-xs tabular-nums text-muted-foreground/60 transition-opacity",
+                          selected.has(u.id) ? "opacity-0" : "opacity-100 group-hover:opacity-0",
+                        )}
+                        aria-hidden
+                      >
+                        {firstRowNumber + i}
+                      </span>
+                      <Checkbox
+                        checked={selected.has(u.id)}
+                        onCheckedChange={() => toggleOne(u.id)}
+                        aria-label={`Select ${u.username}`}
+                        className={cn(
+                          "absolute transition-opacity",
+                          selected.has(u.id) ? "opacity-100" : "opacity-0 group-hover:opacity-100",
+                        )}
+                      />
+                    </div>
                   </TableCell>
                   <TableCell>
-                    <div className="flex items-center gap-2 font-medium">
-                      {u.username}
-                      {u.outbound === "warp" && (
-                        <span className="inline-flex items-center gap-1 rounded bg-orange-500/10 px-1.5 py-0.5 text-[10px] font-medium text-orange-400">
-                          <Cloud className="h-3 w-3" /> WARP
-                        </span>
-                      )}
-                      {/* Only worth the pixels once more than one node exists. */}
-                      {isSuperadmin && u.node_id !== 1 && (
-                        <span
-                          className="inline-flex items-center gap-1 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary"
-                          title={`Terminated by node ${u.node_name}`}
-                        >
-                          <Server className="h-3 w-3" /> {u.node_name}
-                        </span>
-                      )}
-                    </div>
-                    <div className="truncate text-xs text-muted-foreground">
-                      created {relativeTime(u.created_at)}
-                      {isSuperadmin && u.created_by_username && u.created_by_username !== "—" && (
-                        <> · by <span className="text-foreground/70">{u.created_by_username}</span></>
-                      )}
-                      {u.note && <> · {u.note}</>}
+                    <div className="flex items-center gap-2.5">
+                      <Identicon name={u.username} online={u.online} />
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className="truncate font-medium">{u.username}</span>
+                          {u.outbound === "warp" && (
+                            <span
+                              title="Egress via WARP"
+                              className="inline-flex items-center gap-0.5 rounded bg-orange-500/10 px-1 py-0.5 text-[10px] font-medium text-orange-400"
+                            >
+                              <Cloud className="h-2.5 w-2.5" /> WARP
+                            </span>
+                          )}
+                          {/* Only worth the pixels once more than one node exists. */}
+                          {isSuperadmin && u.node_id !== 1 && (
+                            <span
+                              className="inline-flex items-center gap-0.5 rounded bg-primary/10 px-1 py-0.5 text-[10px] font-medium text-primary"
+                              title={`Terminated by node ${u.node_name}`}
+                            >
+                              <Server className="h-2.5 w-2.5" /> {u.node_name}
+                            </span>
+                          )}
+                        </div>
+                        {/* Only rendered when there is something to say. A line
+                            that reads "no reseller" on every row is decoration. */}
+                        {(u.note || (isSuperadmin && u.created_by_username && u.created_by_username !== "—")) && (
+                          <div className="truncate text-[11px] text-muted-foreground">
+                            {isSuperadmin && u.created_by_username && u.created_by_username !== "—" && (
+                              <span className="text-foreground/60">{u.created_by_username}</span>
+                            )}
+                            {u.note && (
+                              <>
+                                {isSuperadmin && u.created_by_username && u.created_by_username !== "—" && " · "}
+                                {u.note}
+                              </>
+                            )}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </TableCell>
                   <TableCell><UserStatusBadge user={u} /></TableCell>
                   <TableCell><QuotaBar used={u.used_bytes} quota={u.quota_bytes} /></TableCell>
-                  <TableCell className="whitespace-nowrap text-xs">
-                    {formatRate(u.rate_down_kbps)} <span className="opacity-40">/</span> {formatRate(u.rate_up_kbps)}
+                  <TableCell className="whitespace-nowrap text-right font-mono text-xs tabular-nums">
+                    <span className="text-foreground/80">{formatRate(u.rate_down_kbps)}</span>
+                    <span className="mx-1 opacity-30">/</span>
+                    <span className="text-muted-foreground">{formatRate(u.rate_up_kbps)}</span>
                   </TableCell>
-                  <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{relativeTime(u.last_seen)}</TableCell>
-                  <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
-                    {u.expires_at ? formatDate(u.expires_at).split(",")[0] : "Never"}
+                  <TableCell className="whitespace-nowrap text-right text-xs text-muted-foreground">
+                    {relativeTime(u.last_seen)}
                   </TableCell>
-                  <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{relativeTime(u.created_at)}</TableCell>
-                  <TableCell onClick={(e) => e.stopPropagation()}>
+                  <TableCell className="whitespace-nowrap text-right text-xs">
+                    {u.expires_at ? (
+                      <span className={cn(u.is_expired && "font-medium text-destructive")}>
+                        {formatDate(u.expires_at).split(",")[0]}
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground/60">Never</span>
+                    )}
+                  </TableCell>
+                  <TableCell className="whitespace-nowrap text-right text-xs text-muted-foreground">
+                    {relativeTime(u.created_at)}
+                  </TableCell>
+                  <TableCell className="pr-4" onClick={(e) => e.stopPropagation()}>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="icon" className="h-8 w-8"><MoreHorizontal className="h-4 w-4" /></Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100"
+                        >
+                          <MoreHorizontal className="h-4 w-4" />
+                        </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
                         <DropdownMenuItem onClick={(e) => { e.stopPropagation(); copyProfile(u); }}>
@@ -496,15 +646,59 @@ export function Users() {
             </TableBody>
           </Table>
 
-          {pageCount > 1 && (
-            <div className="flex items-center justify-between border-t p-3 text-sm">
-              <span className="text-muted-foreground">Page {page + 1} of {pageCount}</span>
-              <div className="flex gap-2">
-                <Button variant="outline" size="sm" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>Previous</Button>
-                <Button variant="outline" size="sm" disabled={page >= pageCount - 1} onClick={() => setPage((p) => p + 1)}>Next</Button>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t px-4 py-3 text-sm">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span className="tabular-nums">
+                {filtered.length === 0
+                  ? "No users"
+                  : `${firstRowNumber}–${Math.min(firstRowNumber + current.length - 1, filtered.length)} of ${filtered.length}`}
+              </span>
+              {selected.size > 0 && (
+                <span className="text-foreground">· {selected.size} selected</span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground">Rows</span>
+                <Select
+                  value={String(pageSize)}
+                  onValueChange={(v) => { setPageSize(Number(v)); setPage(0); }}
+                >
+                  <SelectTrigger className="h-8 w-[72px]"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {PAGE_SIZES.map((n) => (
+                      <SelectItem key={n} value={String(n)}>{n}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="flex items-center gap-1">
+                <span className="mr-1 text-xs tabular-nums text-muted-foreground">
+                  Page {page + 1} of {pageCount}
+                </span>
+                <Button variant="outline" size="icon" className="h-8 w-8"
+                        disabled={page === 0} onClick={() => setPage(0)} title="First page">
+                  <ChevronsLeft className="h-4 w-4" />
+                </Button>
+                <Button variant="outline" size="icon" className="h-8 w-8"
+                        disabled={page === 0} onClick={() => setPage((p) => p - 1)} title="Previous page">
+                  <ChevronLeft className="h-4 w-4" />
+                </Button>
+                <Button variant="outline" size="icon" className="h-8 w-8"
+                        disabled={page >= pageCount - 1} onClick={() => setPage((p) => p + 1)} title="Next page">
+                  <ChevronRight className="h-4 w-4" />
+                </Button>
+                <Button variant="outline" size="icon" className="h-8 w-8"
+                        disabled={page >= pageCount - 1} onClick={() => setPage(pageCount - 1)} title="Last page">
+                  <ChevronsRight className="h-4 w-4" />
+                </Button>
               </div>
             </div>
-          )}
+          </div>
         </CardContent>
       </Card>
 
