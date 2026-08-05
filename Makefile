@@ -4,6 +4,11 @@
 # proto/athena/node/v1/nodehub.proto changes. Requires protoc, protoc-gen-go,
 # protoc-gen-go-grpc and the panel venv's grpcio-tools.
 
+# Stamped into the agent binary and reported to the hub, which is how the Nodes
+# page tells you which build a node is running. Undefined it expanded to an
+# empty string and produced a binary that reported no version at all.
+VERSION    ?= 0.6.1
+
 PROTO      := proto/athena/node/v1/nodehub.proto
 PY_OUT     := backend/app/pb
 GO_OUT     := agent/pb
