@@ -122,6 +122,28 @@ async def _rebaseline_open_sessions(db: AsyncSession, username: str) -> None:
         r.base_rx, r.base_tx = r.last_rx, r.last_tx
 
 
+def _validate_outbound(value: str | None) -> str:
+    """Resolve a submitted outbound, refusing one that does not exist.
+
+    outbound.normalize() degrades an unknown name to direct, which is right for
+    a value already in the database — an outbound deleted underneath a user must
+    not break them. It is wrong for an explicit request: the operator picked a
+    location, got a 200 back, and their user quietly egressed somewhere else.
+    An outbound still awaiting its server counts as unknown here, because
+    assigning to it would do nothing.
+    """
+    if value is None or not str(value).strip():
+        return outbound.DIRECT
+    name = str(value).strip().lower()
+    if name not in outbound.known_names():
+        raise HTTPException(
+            status_code=400,
+            detail=f"No outbound named '{name}' is available. Add it under "
+                   "Settings → Outbounds and finish its registration first.",
+        )
+    return name
+
+
 def _norm_mode(value: str | None) -> str:
     """L2TP mode: 'raw' (no IPsec) — anything else falls back to 'ipsec'."""
     return "raw" if str(value or "").strip().lower() == "raw" else "ipsec"
@@ -254,7 +276,7 @@ async def create_user(
         is_active=payload.is_active,
         expires_at=payload.expires_at,
         note=payload.note or "",
-        outbound=outbound.normalize(payload.outbound),
+        outbound=_validate_outbound(payload.outbound),
         l2tp_mode=_norm_mode(payload.l2tp_mode),
         created_by_admin_id=admin.id,
     )
@@ -287,7 +309,7 @@ async def update_user(
     user = await _require_owned(db, admin, user_id)
     data = payload.model_dump(exclude_unset=True)
     if "outbound" in data:
-        data["outbound"] = outbound.normalize(data["outbound"])
+        data["outbound"] = _validate_outbound(data["outbound"])
     if "l2tp_mode" in data:
         data["l2tp_mode"] = _norm_mode(data["l2tp_mode"])
     if "node_id" in data:
