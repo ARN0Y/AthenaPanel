@@ -6,7 +6,7 @@ import os
 import time
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, select
+from sqlalchemy import bindparam, delete, select, update
 
 from . import (
     accel, accounting, appsettings, backups, chap_secrets, livecache, nodes,
@@ -31,6 +31,27 @@ _LOCAL_COUNTERS: dict[str, tuple[int, int]] = {}
 WG_ONLINE_WINDOW = 180
 
 
+# Counter write-back for live sessions, as ONE executemany.
+#
+# Deliberately built from the Table rather than from the mapped class. Handing
+# an ORM entity to update() opts into "bulk UPDATE by primary key", which
+# asserts that every row it was given still exists and raises StaleDataError
+# when one does not — which is the exact failure this is here to avoid, since
+# ip-down deletes rows out from under the enforcer all day long. A Core
+# statement just updates what is there and says nothing about what is not.
+_S = SessionRow.__table__
+_COUNTER_UPDATE = (
+    _S.update()
+    .where(_S.c.id == bindparam("b_id"))
+    .values(
+        last_rx=bindparam("b_last_rx"),
+        last_tx=bindparam("b_last_tx"),
+        gone_polls=bindparam("b_gone_polls"),
+        stale_since=bindparam("b_stale_since"),
+    )
+)
+
+
 def _aware(ts: datetime | None) -> datetime | None:
     """Treat a naive timestamp as UTC (SQLite round-trips lose the tzinfo)."""
     if ts is not None and ts.tzinfo is None:
@@ -46,10 +67,31 @@ def _duration(started, now) -> int:
     return max(0, int((now - started).total_seconds()))
 
 
-async def _finalize(db, row: SessionRow, user: User | None, now: datetime) -> None:
+async def finalize_session(db, row: SessionRow, user: User | None, now: datetime) -> None:
     """Close a session: commit its bytes to the user (once) and write the ledger
     row, then drop the open-session row. Bytes come from the last authoritative
-    sysfs counter relative to the billing base -> no counter mixing."""
+    sysfs counter relative to the billing base -> no counter mixing.
+
+    CLAIM FIRST, THEN BILL. The ip-down hook finalizes the same session the
+    moment the link drops, so both paths race for every session that ends. The
+    rule has always been "whoever finalizes first owns it" — this makes that
+    rule the delete's own return value instead of an inference.
+
+    The DELETE takes the row lock, so a hook racing us blocks until this
+    transaction commits and then matches nothing. Zero rows deleted means
+    somebody else already billed this session, and we must not bill it twice.
+
+    It used to work by accident: the ORM raised StaleDataError on a row that had
+    vanished, which rolled the whole transaction back and so happened to prevent
+    the double bill — at the cost of throwing away that entire enforcer cycle,
+    thirty times a day.
+    """
+    claimed = await db.execute(delete(SessionRow).where(SessionRow.id == row.id))
+    if claimed.rowcount != 1:
+        log.debug("session %s/%s already finalized elsewhere; skipping",
+                  row.username, row.ifname)
+        return
+
     in_b, out_b = pppd.session_usage(row.last_rx, row.last_tx, row.base_rx, row.base_tx)
     if user is not None:
         user.used_bytes += in_b + out_b
@@ -65,7 +107,6 @@ async def _finalize(db, row: SessionRow, user: User | None, now: datetime) -> No
         bytes_out=out_b,
         duration=_duration(row.started_at, now),
     )
-    await db.delete(row)
 
 
 async def _enforce_once() -> None:
@@ -118,12 +159,35 @@ async def _enforce_once() -> None:
         # used_bytes is NOT advanced per poll; a live session's usage is the
         # overlay (counter - base), committed to used_bytes exactly once at
         # finalize -> self-healing, never drifts.
+        # Counter updates are collected and written as ONE bulk statement keyed
+        # by primary key, rather than left to the unit of work.
+        #
+        # The reason is the race with ip-down: the hook deletes a session row
+        # the moment the link drops, and the ORM, told to UPDATE a row that is
+        # no longer there, raises StaleDataError and takes the whole cycle down
+        # with it — every sample, every finalize, every counter in the pass.
+        # An UPDATE ... WHERE id = :id simply matches nothing, which is the
+        # correct meaning of "that session ended while we were looking at it".
+        #
+        # The in-memory objects are still updated, because section 2 computes
+        # effective usage from them, and expunged so the unit of work does not
+        # chase them. From here they are read-only value objects.
+        counter_updates: list[dict] = []
         for row in list(rows_by_iface.values()):
             if row.ifname in live_set:
                 rx, tx = pppd.read_iface_bytes(row.ifname)
                 row.last_rx, row.last_tx = rx, tx
                 row.gone_polls = 0
                 row.stale_since = None  # the node is talking about it again
+                # An orphan registered a few lines above has no id yet and no
+                # other writer can know about it, so there is nothing to race:
+                # leave those to the unit of work, which is what inserts them.
+                if row.id is not None:
+                    counter_updates.append({
+                        "b_id": row.id, "b_last_rx": rx, "b_last_tx": tx,
+                        "b_gone_polls": 0, "b_stale_since": None,
+                    })
+                    db.expunge(row)
                 active_rows_by_user.setdefault(row.username, []).append(row)
                 db.add(UsageSample(
                     ts=now, node_id=row.node_id, ifname=row.ifname, username=row.username,
@@ -137,14 +201,30 @@ async def _enforce_once() -> None:
                     user = (
                         await db.execute(select(User).where(User.username == row.username))
                     ).scalar_one_or_none()
-                    await _finalize(db, row, user, now)
+                    db.expunge(row)
+                    await finalize_session(db, row, user, now)
+                elif row.id is not None:
+                    counter_updates.append({
+                        "b_id": row.id, "b_last_rx": row.last_rx, "b_last_tx": row.last_tx,
+                        "b_gone_polls": row.gone_polls, "b_stale_since": row.stale_since,
+                    })
+                    db.expunge(row)
             elif row.stale_since is None:
                 # The node went quiet. Hold the row untouched: its bytes stay
                 # uncommitted and its base is preserved, so when the node comes
                 # back the session simply resumes instead of being billed twice.
                 row.stale_since = now
+                if row.id is not None:
+                    counter_updates.append({
+                        "b_id": row.id, "b_last_rx": row.last_rx, "b_last_tx": row.last_tx,
+                        "b_gone_polls": row.gone_polls or 0, "b_stale_since": now,
+                    })
+                    db.expunge(row)
                 log.warning("node %d silent; holding session %s/%s (not finalizing)",
                             row.node_id, row.username, row.ifname)
+
+        if counter_updates:
+            await db.execute(_COUNTER_UPDATE, counter_updates)
 
         # --- 1.5) WireGuard accounting --------------------------------------
         # Peers are perpetual (no connect/disconnect), so WG bytes flow
@@ -244,7 +324,7 @@ async def _enforce_once() -> None:
                 # (pid=0). Then finalize so the bytes are committed and counted.
                 await pppd.terminate_user(db, username)
                 for r in urows:
-                    await _finalize(db, r, user, now)
+                    await finalize_session(db, r, user, now)
                 secrets_dirty = True
                 why = "quota" if over_quota else f"active={user.is_active} expired={user.is_expired}"
                 log.info("terminated %s: %s (effective=%d quota=%d)",
@@ -263,7 +343,7 @@ async def _enforce_once() -> None:
                 if not reason:
                     continue
                 pppd.kill_pid(r.pid if r.pid and r.pid > 0 else pppd.pid_from_ifname(r.ifname))
-                await _finalize(db, r, user, now)
+                await finalize_session(db, r, user, now)
                 log.warning("dropped %s on %s (%s): %s", username, r.ifname, r.peer_ip, reason)
 
         # 2b) WireGuard peers: kick over-quota/expired/disabled, re-add healthy

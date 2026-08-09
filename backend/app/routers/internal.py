@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import accounting, audit, outbound, pppd
+from .. import accounting, audit, outbound, pppd, tasks
 from ..database import get_session
 from ..models import LOCAL_NODE_ID, Session as SessionRow
 from ..models import User
@@ -20,6 +20,49 @@ from ..schemas import RateOut, SessionDownIn, SessionUpIn, SessionUpOut
 log = logging.getLogger("vpn-panel.internal")
 
 router = APIRouter(prefix="/api/internal", tags=["internal"])
+
+
+async def _register_session(db: AsyncSession, **values) -> None:
+    """INSERT ... ON CONFLICT (node_id, ifname) DO UPDATE.
+
+    The kernel hands out ppp interface names again as soon as they are free, so
+    the natural key of a live session is reused constantly and two hooks can
+    genuinely collide on it. An upsert is the only registration that is correct
+    under that collision; a delete-then-insert is two statements with a gap in
+    the middle, and the gap is where the 72 rejected sessions a day came from.
+
+    Both dialects this runs on support ON CONFLICT, they just spell the
+    construct differently — Postgres in production, SQLite under test.
+    """
+    values = dict(values, last_rx=values["base_rx"], last_tx=values["base_tx"])
+    dialect = db.bind.dialect.name if db.bind is not None else "postgresql"
+    if dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as _insert
+    else:
+        from sqlalchemy.dialects.postgresql import insert as _insert
+
+    stmt = _insert(SessionRow).values(**values)
+    # started_at / gone_polls / stale_since come from the column defaults on a
+    # fresh insert; on a conflict they must be reset explicitly, or the new
+    # session would inherit the old one's start time and its gone-poll count.
+    await db.execute(
+        stmt.on_conflict_do_update(
+            index_elements=[SessionRow.node_id, SessionRow.ifname],
+            set_={
+                "username": stmt.excluded.username,
+                "peer_ip": stmt.excluded.peer_ip,
+                "pid": stmt.excluded.pid,
+                "proto": stmt.excluded.proto,
+                "base_rx": stmt.excluded.base_rx,
+                "base_tx": stmt.excluded.base_tx,
+                "last_rx": stmt.excluded.last_rx,
+                "last_tx": stmt.excluded.last_tx,
+                "started_at": datetime.now(timezone.utc),
+                "gone_polls": 0,
+                "stale_since": None,
+            },
+        )
+    )
 
 
 def _local_only(request: Request) -> None:
@@ -45,15 +88,39 @@ async def get_rate(username: str, db: AsyncSession = Depends(get_session)):
 
 @router.post("/session-up", response_model=SessionUpOut, dependencies=[Depends(_local_only)])
 async def session_up(payload: SessionUpIn, db: AsyncSession = Depends(get_session)):
-    # Remove any stale row for the same interface, then register. Scoped to this
+    # Take over the interface name, finalizing whatever held it. Scoped to this
     # node: these hooks only ever run on the box that owns the interface, and a
     # remote node's identically-named ppp0 is a different session entirely.
-    await db.execute(
-        delete(SessionRow).where(
-            SessionRow.node_id == LOCAL_NODE_ID,
-            SessionRow.ifname == payload.ifname,
+    #
+    # The kernel recycles ppp names, so a customer who drops and redials within
+    # a second lands on the very interface number they just left. That used to
+    # be a plain DELETE followed by an INSERT, which is not atomic: two hooks
+    # arriving together each deleted what they could see and each inserted, and
+    # the second lost to the (node_id, ifname) unique index — 72 rejected
+    # session registrations a day, each one a session the panel did not know
+    # about until the enforcer picked it up a cycle later.
+    #
+    # It also threw the displaced row away without billing it. If ip-down never
+    # arrived for that session — which is exactly the case where its name gets
+    # recycled this fast — its traffic was written off. Finalizing it here
+    # closes that hole; _finalize claims the row before billing, so if ip-down
+    # or the enforcer already handled it, this bills nothing.
+    stale = (
+        await db.execute(
+            select(SessionRow).where(
+                SessionRow.node_id == LOCAL_NODE_ID,
+                SessionRow.ifname == payload.ifname,
+            )
         )
-    )
+    ).scalar_one_or_none()
+    if stale is not None:
+        prev_user = (
+            await db.execute(select(User).where(User.username == stale.username))
+        ).scalar_one_or_none()
+        db.expunge(stale)
+        await tasks.finalize_session(db, stale, prev_user, datetime.now(timezone.utc))
+        log.info("iface %s reused by %s; finalized the previous session (%s)",
+                 payload.ifname, payload.username, stale.username)
     # Classify from the address pool (shared helper) so a raw, no-IPsec session
     # is labelled L2TP-RAW in the ledger too, not just in the live view.
     proto = pppd.classify_proto(payload.peer_ip)
@@ -63,19 +130,24 @@ async def session_up(payload: SessionUpIn, db: AsyncSession = Depends(get_sessio
     base_rx, base_tx = (
         pppd.read_iface_bytes(payload.ifname) if pppd.iface_exists(payload.ifname) else (0, 0)
     )
-    db.add(
-        SessionRow(
-            node_id=LOCAL_NODE_ID,
-            username=payload.username,
-            ifname=payload.ifname,
-            peer_ip=payload.peer_ip,
-            pid=payload.pid,
-            proto=proto,
-            base_rx=base_rx,
-            base_tx=base_tx,
-            last_rx=base_rx,
-            last_tx=base_tx,
-        )
+    # Registered as an UPSERT on (node_id, ifname), not an INSERT.
+    #
+    # Finalizing the previous holder above is not enough on its own: two hooks
+    # for the same recycled name can both get past it, and the loser of the
+    # unique index would have its session rejected outright. Letting the
+    # conflict resolve to "the later hook wins" is right — ip-up runs after the
+    # interface exists, so the newest registration is the one describing the
+    # session that is actually up.
+    await _register_session(
+        db,
+        node_id=LOCAL_NODE_ID,
+        username=payload.username,
+        ifname=payload.ifname,
+        peer_ip=payload.peer_ip,
+        pid=payload.pid,
+        proto=proto,
+        base_rx=base_rx,
+        base_tx=base_tx,
     )
     user = (
         await db.execute(select(User).where(User.username == payload.username))
@@ -121,9 +193,22 @@ async def session_down(payload: SessionDownIn, db: AsyncSession = Depends(get_se
 
     # Primary finalize path (fast, on disconnect). The enforcer's debounced
     # iface-gone check is the fallback if this hook never arrives (crash). The
-    # first to finalize deletes the row; the other sees row=None and skips, so
+    # first to finalize deletes the row; the other matches nothing and skips, so
     # bytes are committed exactly once.
-    if row is not None and user is not None and row.username == payload.username:
+    #
+    # CLAIM FIRST, THEN BILL — the delete's row count is what decides ownership,
+    # not the SELECT above, which the enforcer can invalidate in the microseconds
+    # between the two.
+    claimed = False
+    if row is not None:
+        claimed = (
+            await db.execute(delete(SessionRow).where(SessionRow.id == row.id))
+        ).rowcount == 1
+        if not claimed:
+            log.debug("session %s/%s was finalized by the enforcer first",
+                      payload.username, payload.ifname)
+
+    if claimed and user is not None and row.username == payload.username:
         # Final counters since the billing base. Prefer the freshest sysfs read;
         # for a fresh session (base 0) also take pppd's authoritative this-session
         # totals as a floor — both are measured from session start, so they are
@@ -158,9 +243,9 @@ async def session_down(payload: SessionDownIn, db: AsyncSession = Depends(get_se
             bytes_out=out_b,
             duration=duration,
         )
-        await db.delete(row)
     elif user is not None:
-        # Row already finalized (enforcer) or user/ifname mismatch -> just touch.
+        # Row already finalized (enforcer), or the username on it does not match
+        # this hook -> nothing to bill, just touch the account.
         user.last_seen = now
 
     await db.commit()
