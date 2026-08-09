@@ -110,6 +110,9 @@ async def _migrate_columns(conn) -> None:
 # usage_samples hypertable.
 _PG_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("users", "outbound", "VARCHAR(16) NOT NULL DEFAULT 'direct'"),
+    # Outbounds stopped being a two-value enum ('direct'|'warp') when operator-
+    # added egress locations arrived, and a location's name no longer fits in 16.
+    # ALTER TYPE rather than ADD COLUMN, so it gets its own step below.
     ("users", "l2tp_mode", "VARCHAR(8) NOT NULL DEFAULT 'ipsec'"),
     # Multi-node: every session / sample / ledger row records which server
     # produced it. Existing rows are all from this server, so DEFAULT 1 is the
@@ -193,6 +196,22 @@ async def _migrate_columns_pg(conn) -> int:
     return failed
 
 
+async def _migrate_types_pg(conn) -> int:
+    """Widen columns whose meaning outgrew their original size.
+
+    Widening is safe in a way that narrowing never is: no existing value can
+    fail to fit, and Postgres takes no table rewrite for a VARCHAR length
+    increase. Re-running is a no-op, so this needs no marker row.
+    """
+    failed = 0
+    for sql in (
+        # 'direct' | 'warp' -> either of those or an outbound's name.
+        "ALTER TABLE users ALTER COLUMN outbound TYPE VARCHAR(32)",
+    ):
+        failed += 0 if await _try_ddl(conn, sql) else 1
+    return failed
+
+
 async def _migrate_indexes_pg(conn) -> int:
     """Re-shape indexes that changed meaning when nodes were introduced.
 
@@ -259,6 +278,7 @@ async def init_db() -> None:
         async with engine.connect() as conn:
             conn = await conn.execution_options(isolation_level="AUTOCOMMIT")
             failed = await _migrate_columns_pg(conn)
+            failed += await _migrate_types_pg(conn)
             failed += await _migrate_indexes_pg(conn)
             await _setup_timescale(conn)
         if failed:

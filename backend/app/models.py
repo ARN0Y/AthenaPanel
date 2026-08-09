@@ -95,8 +95,18 @@ class User(Base):
     last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     total_sessions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     note: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    # Egress routing: "direct" (node's own IP) or "warp" (Cloudflare WARP).
-    outbound: Mapped[str] = mapped_column(String(16), default="direct", nullable=False)
+    # Egress routing, by NAME: the built-ins "direct" (this host's own address)
+    # and "warp" (Cloudflare WARP), or the name of a row in `outbounds`.
+    #
+    # A name rather than a foreign key on purpose: the built-ins have no row, and
+    # deleting an outbound must degrade its users to direct rather than fail or
+    # cascade. outbound.normalize() resolves an unknown name to "direct", so a
+    # dangling reference is safe by construction.
+    #
+    # Enforced on the host that terminates the session — see outbound.py. For a
+    # user served by a REMOTE node this field is carried in UserSync but has no
+    # effect there, because their traffic never crosses this host.
+    outbound: Mapped[str] = mapped_column(String(32), default="direct", nullable=False)
     # "ipsec" = L2TP/IPsec (default, encrypted) | "raw" = L2TP without IPsec.
     # Selects which entry host the customer is given; see config.l2tp_raw_address.
     l2tp_mode: Mapped[str] = mapped_column(String(8), default="ipsec", nullable=False)
@@ -418,3 +428,65 @@ class WgPeer(Base):
     session_base_tx: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class Outbound(Base):
+    """An egress location: a WireGuard tunnel from this host to a server the
+    operator owns, that selected users' traffic leaves through.
+
+    "direct" and "warp" are NOT rows here — they are built-ins whose plumbing
+    predates this table (setup-warp.sh). A row is an operator-added location,
+    created by pasting the registration line that athena-outbound.sh prints on
+    the remote server. Everything the host needs to bring the tunnel up lives in
+    this row, so the plumbing can always be rebuilt from the database alone.
+
+    Why the resources are stored rather than derived: fwmark, table and rule
+    priority must stay stable for the life of an outbound. Deriving them from
+    the row id would be fine until a row is deleted and the ids shift meaning,
+    and deriving them from the name would change them on rename. They are
+    allocated once at creation and never move.
+    """
+
+    __tablename__ = "outbounds"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # Slug. Also names the interface (ob-<name>) and the ipset, so it is capped
+    # well under IFNAMSIZ (16 including the NUL) and validated to [a-z0-9-].
+    name: Mapped[str] = mapped_column(String(12), unique=True, index=True, nullable=False)
+    label: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), default="wireguard", nullable=False)
+
+    # The remote end.
+    endpoint: Mapped[str] = mapped_column(String(128), default="", nullable=False)  # host:port
+    public_key: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    preshared_key: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    peer_address: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+
+    # This host's end of the tunnel.
+    private_key: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    address: Mapped[str] = mapped_column(String(64), default="", nullable=False)  # our /32 inside the tunnel
+    mtu: Mapped[int] = mapped_column(Integer, default=1380, nullable=False)
+
+    # Allocated once, never reused while the row lives.
+    fwmark: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    table_id: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    rule_priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    note: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    # Last observation from the health check, for the Outbounds tab. Display
+    # only: routing never consults these, so a stale probe can never strand a
+    # user's traffic.
+    last_status: Mapped[str] = mapped_column(String(16), default="unknown", nullable=False)
+    last_egress_ip: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    @property
+    def ifname(self) -> str:
+        return f"ob-{self.name}"
+
+    @property
+    def ipset(self) -> str:
+        return f"ob-{self.name}"

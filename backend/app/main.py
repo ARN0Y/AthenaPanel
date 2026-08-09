@@ -158,9 +158,13 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001
         log.exception("initial snapshot failed")
 
-    # Re-apply WARP outbound mappings for sessions that survived the restart.
+    # Re-apply outbound mappings for sessions that survived the restart, and
+    # learn the operator's egress locations before the first request arrives —
+    # normalize() resolves anything it does not know to "direct", so a user edit
+    # handled before this ran would silently move that user off their location.
     try:
         async with AsyncSessionLocal() as db:
+            await outbound.refresh_known(db)
             await outbound.reconcile(db)
     except Exception:  # noqa: BLE001
         log.exception("initial outbound reconcile failed")

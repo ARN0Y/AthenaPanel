@@ -1,14 +1,15 @@
 """Settings endpoint: server / network info + editable client-facing profile."""
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import appsettings, audit, outbound
 from ..config import settings
 from ..database import get_session
 from ..deps import require_admin, require_superadmin
-from ..models import Admin
-from ..schemas import PanelSettingsUpdate, SettingsOut
+from ..models import Admin, Outbound, User
+from ..schemas import OutboundCreate, OutboundRegister, PanelSettingsUpdate, SettingsOut
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -90,5 +91,138 @@ async def _validate_endpoints(db: AsyncSession, changes: dict) -> None:
 # counts -> superadmin only.
 @router.get("/outbounds", dependencies=[Depends(require_superadmin)])
 async def list_outbounds(db: AsyncSession = Depends(get_session)):
-    """Live status of each egress outbound (direct / warp) for the Outbounds tab."""
+    """Live status of every egress outbound for the Outbounds tab."""
     return await outbound.status(db)
+
+
+@router.post("/outbounds", dependencies=[Depends(require_superadmin)])
+async def create_outbound(
+    payload: OutboundCreate,
+    admin: Admin = Depends(require_superadmin),
+    db: AsyncSession = Depends(get_session),
+):
+    """Reserve a location and return the command to run on its server.
+
+    Two steps, because the panel must own the addressing: two locations that
+    each picked their own tunnel subnet would collide here, where all of them
+    terminate side by side. So the panel allocates first — mark, table, rule
+    priority, /30 and this end's keypair — and hands back a command with those
+    baked in. Nothing is plumbed yet; the row is a reservation until the remote
+    server answers with its public key.
+    """
+    name = (payload.name or "").strip().lower()
+    if not outbound.valid_name(name):
+        raise HTTPException(
+            status_code=400,
+            detail="Name must be 2-12 characters of a-z, 0-9 or '-', and not "
+                   "'direct' or 'warp'.",
+        )
+    if (await db.execute(select(Outbound).where(Outbound.name == name))).scalar_one_or_none():
+        raise HTTPException(status_code=409, detail=f"An outbound named '{name}' already exists.")
+
+    mark, table, prio, address, peer_address = await outbound.allocate(db)
+    private_key, public_key = outbound.generate_keypair()
+    psk = outbound.generate_psk()
+
+    ob = Outbound(
+        name=name,
+        label=(payload.label or name).strip()[:64],
+        note=(payload.note or "").strip(),
+        private_key=private_key,
+        preshared_key=psk,
+        address=address,
+        peer_address=peer_address,
+        mtu=payload.mtu or 1380,
+        fwmark=mark,
+        table_id=table,
+        rule_priority=prio,
+        enabled=False,  # a reservation until the remote registers
+    )
+    db.add(ob)
+    await db.commit()
+    await db.refresh(ob)
+    await audit.record(db, admin, "outbound.create", target=name)
+
+    return {
+        "name": ob.name,
+        "install_command": outbound.install_command(ob, public_key, payload.port or 51833),
+        "expects": "Run that on the egress server, then POST its output to /register.",
+    }
+
+
+@router.post("/outbounds/{name}/register", dependencies=[Depends(require_superadmin)])
+async def register_outbound(
+    name: str,
+    payload: OutboundRegister,
+    admin: Admin = Depends(require_superadmin),
+    db: AsyncSession = Depends(get_session),
+):
+    """Complete a reservation with the line athena-outbound.sh printed, then
+    bring the tunnel up. Re-registering is allowed and is how you point an
+    existing location at a rebuilt server."""
+    ob = (await db.execute(select(Outbound).where(Outbound.name == name))).scalar_one_or_none()
+    if ob is None:
+        raise HTTPException(status_code=404, detail="No such outbound.")
+
+    parsed = outbound.parse_registration(payload.registration)
+    if parsed is None:
+        raise HTTPException(
+            status_code=400,
+            detail="That does not look like the line the script printed. It should "
+                   "read athena-ob:<address>:<port>:<public key>.",
+        )
+    host, port, public_key = parsed
+    ob.endpoint = f"{host}:{port}"
+    ob.public_key = public_key
+    ob.enabled = True
+    await db.commit()
+    await db.refresh(ob)
+
+    ok, out = await outbound.plumb_up(ob)
+    if not ok:
+        # Keep the row: the registration is good, the host is not. Deleting it
+        # would throw away the keypair the remote server is already configured
+        # with, forcing the operator to redo the far end too.
+        ob.enabled = False
+        ob.last_status = "error"
+        await db.commit()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Registered, but the tunnel would not come up: {out.strip()[-300:]}",
+        )
+    await outbound.refresh_known(db)
+    await outbound.reconcile(db)
+    await audit.record(db, admin, "outbound.register", target=name, detail=ob.endpoint)
+    return {"ok": True, "name": ob.name, "endpoint": ob.endpoint}
+
+
+@router.delete("/outbounds/{name}", dependencies=[Depends(require_superadmin)])
+async def delete_outbound(
+    name: str,
+    admin: Admin = Depends(require_superadmin),
+    db: AsyncSession = Depends(get_session),
+):
+    """Tear a location down and move its users back to direct.
+
+    The users are moved explicitly rather than left pointing at a name that no
+    longer resolves. normalize() would already treat them as direct, but a
+    stored value that disagrees with what is happening is the kind of thing that
+    wastes an hour six months from now.
+    """
+    ob = (await db.execute(select(Outbound).where(Outbound.name == name))).scalar_one_or_none()
+    if ob is None:
+        raise HTTPException(status_code=404, detail="No such outbound.")
+
+    moved = (
+        await db.execute(
+            update(User).where(User.outbound == name).values(outbound=outbound.DIRECT)
+        )
+    ).rowcount or 0
+    await db.delete(ob)
+    await db.commit()
+
+    await outbound.plumb_down(name)
+    await outbound.refresh_known(db)
+    await outbound.reconcile(db)
+    await audit.record(db, admin, "outbound.delete", target=name, detail=f"{moved} user(s) -> direct")
+    return {"ok": True, "moved_to_direct": moved}

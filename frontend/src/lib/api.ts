@@ -279,11 +279,22 @@ export interface OutboundStatus {
   name: string;
   kind: string;
   description: string;
-  status: "up" | "down";
+  status: "up" | "down" | "disabled";
   egress_ip: string | null;
   users: number;
-  active: number | null;   // live IPs currently routed (warp), null for direct
+  active: number | null;   // live IPs currently routed, null for direct
   is_default: boolean;
+  removable?: boolean;     // false for the built-in direct / warp
+  endpoint?: string;
+  mtu?: number;
+  created_at?: string | null;
+}
+
+export interface OutboundCreated {
+  name: string;
+  /** The command to run on the egress server. Contains the pre-shared key. */
+  install_command: string;
+  expects: string;
 }
 
 export interface WgStatus {
@@ -446,6 +457,18 @@ export const api = {
   updateSettings: (p: PanelSettingsPayload) =>
     request<ServerSettings>("/api/settings", { method: "PUT", body: JSON.stringify(p) }),
   outbounds: () => request<OutboundStatus[]>("/api/settings/outbounds"),
+  outboundCreate: (body: { name: string; label?: string; note?: string; port?: number; mtu?: number }) =>
+    request<OutboundCreated>("/api/settings/outbounds", { method: "POST", body: JSON.stringify(body) }),
+  outboundRegister: (name: string, registration: string) =>
+    request<{ ok: boolean; name: string; endpoint: string }>(
+      `/api/settings/outbounds/${encodeURIComponent(name)}/register`,
+      { method: "POST", body: JSON.stringify({ registration }) },
+    ),
+  outboundDelete: (name: string) =>
+    request<{ ok: boolean; moved_to_direct: number }>(
+      `/api/settings/outbounds/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    ),
 
   wgStatus: (userId: number) => request<WgStatus>(`/api/wireguard/${userId}`),
   wgEnable: (userId: number) => request<WgStatus>(`/api/wireguard/${userId}/enable`, { method: "POST" }),

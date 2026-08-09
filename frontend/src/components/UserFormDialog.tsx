@@ -121,6 +121,21 @@ export function UserFormDialog({
     enabled: isSuperadmin,
     retry: false,
   });
+  // The operator's egress locations, so the selector offers whatever exists
+  // rather than a hardcoded pair. Superadmin-only, like the endpoint itself; a
+  // reseller keeps the two built-ins.
+  const { data: outbounds = [] } = useQuery({
+    queryKey: ["outbounds"],
+    queryFn: api.outbounds,
+    enabled: isSuperadmin,
+    retry: false,
+  });
+  // Outbounds are policy-routed on the host that terminates the session, so
+  // they only mean anything for users this panel serves itself. A user handed
+  // to a node egresses from that node, and pretending otherwise in the UI would
+  // have the operator setting a field that does nothing.
+  const servedRemotely = nodeId !== 1;
+
   const rawConfigured = !!settings?.l2tp_raw_address?.trim();
   const showModeSelect = rawConfigured || l2tpMode === "raw";
 
@@ -274,14 +289,28 @@ export function UserFormDialog({
                   </Select>
                 </Field>
               )}
-              <Field label="Outbound" htmlFor="u-outbound">
-                <Select value={outbound} onValueChange={setOutbound}>
+              <Field
+                label="Outbound"
+                htmlFor="u-outbound"
+                hint={servedRemotely ? "served by a node — egress is that node's own" : undefined}
+              >
+                <Select value={outbound} onValueChange={setOutbound} disabled={servedRemotely}>
                   <SelectTrigger id="u-outbound">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
+                    {/* Always offer the built-ins, even before the list loads,
+                        so the field is never empty for the common case. */}
                     <SelectItem value="direct">Direct</SelectItem>
                     <SelectItem value="warp">Cloudflare WARP</SelectItem>
+                    {outbounds
+                      .filter((o) => !["direct", "warp"].includes(o.id))
+                      .map((o) => (
+                        <SelectItem key={o.id} value={o.id}>
+                          {o.name}
+                          {o.status !== "up" ? " (down)" : ""}
+                        </SelectItem>
+                      ))}
                   </SelectContent>
                 </Select>
               </Field>

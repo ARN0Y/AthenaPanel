@@ -56,6 +56,39 @@ install -d -m 0755 /etc/ppp/ip-up.d /etc/ppp/ip-down.d
 install -m 0755 "$REPO_DIR/configs/ppp-ip-up.sh"   /etc/ppp/ip-up.d/vpn-panel
 install -m 0755 "$REPO_DIR/configs/ppp-ip-down.sh" /etc/ppp/ip-down.d/vpn-panel
 
+# --- egress locations (outbounds) ----------------------------------------
+# The panel shells out to outbound-plumb.sh to bring a location up or down, so
+# this has to land before the backend restarts or adding one fails with ENOENT.
+# The health timer withdraws an unhealthy location's ip rule, which is what
+# makes its users fall back to direct instead of blackholing.
+install -m 0755 "$REPO_DIR/configs/outbound-plumb.sh"  /usr/local/sbin/outbound-plumb.sh
+install -m 0755 "$REPO_DIR/configs/outbound-health.sh" /usr/local/sbin/outbound-health.sh
+cat > /etc/systemd/system/outbound-health.service <<'EOF'
+[Unit]
+Description=Egress location health-check + fallback to direct
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/outbound-health.sh
+EOF
+cat > /etc/systemd/system/outbound-health.timer <<'EOF'
+[Unit]
+Description=Run the egress location health-check every 30s
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload
+systemctl enable --now outbound-health.timer >/dev/null 2>&1 || true
+command -v ipset >/dev/null 2>&1 || apt-get install -y -qq ipset >/dev/null 2>&1 || true
+log "outbound plumbing installed"
+
 # --- secret panel path (build base + nginx) ------------------------------
 PANEL_PATH="$(readkey PANEL_PATH)"; : "${PANEL_PATH:=/admin-athena}"
 PANEL_PATH="/${PANEL_PATH#/}"; PANEL_PATH="${PANEL_PATH%/}"

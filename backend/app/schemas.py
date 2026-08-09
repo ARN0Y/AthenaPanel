@@ -407,3 +407,22 @@ class NodeOut(BaseModel):
     ext_l2tp_raw_address: str = ""
     ext_sstp_address: str = ""
     ext_wg_endpoint: str = ""
+
+
+# ---- Outbounds (operator-added egress locations) ----
+class OutboundCreate(BaseModel):
+    # Names the interface (ob-<name>) and the ipset, so it is short and
+    # restricted; validated properly in outbound.valid_name().
+    name: str = Field(min_length=2, max_length=12)
+    label: str = ""
+    note: str = ""
+    port: int = Field(default=51833, ge=1, le=65535)
+    # 1380 = 1500 - 60 (WireGuard) - 60 of headroom for whatever the egress
+    # server's own path already costs. Lower it if that path is itself a tunnel.
+    mtu: int = Field(default=1380, ge=1280, le=1500)
+
+
+class OutboundRegister(BaseModel):
+    """The single line athena-outbound.sh prints when it finishes."""
+
+    registration: str
