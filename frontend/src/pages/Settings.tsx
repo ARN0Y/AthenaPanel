@@ -12,7 +12,6 @@ import {
   KeyRound,
   Moon,
   Network,
-  Plus,
   Send,
   Server,
   Sun,
@@ -21,28 +20,9 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -54,179 +34,12 @@ import { useTheme } from "@/hooks/useTheme";
 import { api, ApiError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { formatBytes, formatUptime, relativeTime } from "@/lib/format";
-
-/** Add an egress location. Two steps, because the panel allocates the tunnel
- *  addressing: reserve here, run the command it gives you on the target server,
- *  paste back the line that command prints. */
-function AddOutboundDialog() {
-  const qc = useQueryClient();
-  const [open, setOpen] = React.useState(false);
-  const [name, setName] = React.useState("");
-  const [label, setLabel] = React.useState("");
-  const [command, setCommand] = React.useState("");
-  const [registration, setRegistration] = React.useState("");
-  const [copied, setCopied] = React.useState(false);
-
-  const reset = () => {
-    setName(""); setLabel(""); setCommand(""); setRegistration(""); setCopied(false);
-  };
-
-  const create = useMutation({
-    mutationFn: () => api.outboundCreate({ name: name.trim().toLowerCase(), label: label.trim() }),
-    onSuccess: (r) => setCommand(r.install_command),
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : "Could not reserve the outbound"),
-  });
-
-  const register = useMutation({
-    mutationFn: () => api.outboundRegister(name.trim().toLowerCase(), registration.trim()),
-    onSuccess: (r) => {
-      toast.success(`Outbound "${r.name}" is up`, { description: r.endpoint });
-      qc.invalidateQueries({ queryKey: ["outbounds"] });
-      setOpen(false);
-      reset();
-    },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : "Registration failed"),
-  });
-
-  return (
-    <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (!o) reset(); }}>
-      <DialogTrigger asChild>
-        <Button size="sm" variant="outline" className="shrink-0">
-          <Plus className="h-4 w-4" /> Add outbound
-        </Button>
-      </DialogTrigger>
-      <DialogContent className="sm:max-w-xl">
-        <DialogHeader>
-          <DialogTitle>Add an egress location</DialogTitle>
-          <DialogDescription>
-            A WireGuard tunnel to a server you own. Traffic for the users you assign to it leaves
-            from that server's address.
-          </DialogDescription>
-        </DialogHeader>
-
-        {!command ? (
-          <div className="space-y-4">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <Label htmlFor="ob-name">Name</Label>
-                <Input
-                  id="ob-name"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="tr-ist"
-                  autoFocus
-                />
-                <p className="text-[11px] text-muted-foreground">
-                  2–12 characters, a–z, 0–9 or “-”. Names the tunnel interface.
-                </p>
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="ob-label">Label</Label>
-                <Input
-                  id="ob-label"
-                  value={label}
-                  onChange={(e) => setLabel(e.target.value)}
-                  placeholder="Istanbul"
-                />
-                <p className="text-[11px] text-muted-foreground">What you'll see in the user form.</p>
-              </div>
-            </div>
-            <Button
-              className="w-full"
-              disabled={name.trim().length < 2 || create.isPending}
-              onClick={() => create.mutate()}
-            >
-              {create.isPending ? "Reserving…" : "Continue"}
-            </Button>
-          </div>
-        ) : (
-          <div className="space-y-4">
-            <div className="space-y-1.5">
-              <Label>1. Run this on the server you want to exit from</Label>
-              <div className="flex items-start gap-2 rounded-md border bg-muted/40 p-3">
-                <code className="flex-1 break-all font-mono text-[11px] leading-relaxed">{command}</code>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  className="h-7 w-7 shrink-0"
-                  onClick={() => {
-                    navigator.clipboard.writeText(command);
-                    setCopied(true);
-                    setTimeout(() => setCopied(false), 1500);
-                  }}
-                >
-                  {copied ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
-                </Button>
-              </div>
-              <p className="text-[11px] text-muted-foreground">
-                Ubuntu/Debian, x86 or ARM. Contains a pre-shared key — don't post it anywhere.
-              </p>
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="ob-reg">2. Paste the line it printed</Label>
-              <Input
-                id="ob-reg"
-                value={registration}
-                onChange={(e) => setRegistration(e.target.value)}
-                placeholder="athena-ob:203.0.113.9:51833:…"
-                className="font-mono text-xs"
-              />
-            </div>
-            <Button
-              className="w-full"
-              disabled={!registration.trim() || register.isPending}
-              onClick={() => register.mutate()}
-            >
-              {register.isPending ? "Bringing the tunnel up…" : "Finish"}
-            </Button>
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function DeleteOutboundButton({ name, label, users }: { name: string; label: string; users: number }) {
-  const qc = useQueryClient();
-  const del = useMutation({
-    mutationFn: () => api.outboundDelete(name),
-    onSuccess: (r) => {
-      toast.success(`Removed “${label}”`, {
-        description: r.moved_to_direct
-          ? `${r.moved_to_direct} user(s) moved to Direct`
-          : "No users were assigned to it",
-      });
-      qc.invalidateQueries({ queryKey: ["outbounds"] });
-    },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : "Could not remove it"),
-  });
-
-  return (
-    <AlertDialog>
-      <AlertDialogTrigger asChild>
-        <Button size="icon" variant="ghost" className="h-6 w-6 text-muted-foreground hover:text-destructive">
-          <Trash2 className="h-3.5 w-3.5" />
-        </Button>
-      </AlertDialogTrigger>
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle>Remove “{label}”?</AlertDialogTitle>
-          <AlertDialogDescription>
-            The tunnel is torn down here and{" "}
-            {users > 0
-              ? `${users} user(s) assigned to it move back to Direct.`
-              : "no users are assigned to it."}{" "}
-            The egress server itself is left running — nothing is changed there.
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction onClick={() => del.mutate()}>Remove</AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
-  );
-}
+import { flagOf } from "@/lib/countries";
+import {
+  AddOutboundDialog,
+  DeleteOutboundButton,
+  EditOutboundDialog,
+} from "./outbound-dialogs";
 
 function CopyField({ label, value, secret }: { label: string; value: string; secret?: boolean }) {
   const [show, setShow] = React.useState(!secret);
@@ -423,9 +236,14 @@ export function Settings() {
                       <div className="flex items-center gap-2">
                         {o.kind === "warp" ? (
                           <Cloud className="h-5 w-5 text-orange-400" />
-                        ) : (
+                        ) : o.country ? null : (
                           <ArrowUpRight className="h-5 w-5 text-muted-foreground" />
                         )}
+                        {o.country ? (
+                          <span className="text-base leading-none" title={o.country.toUpperCase()}>
+                            {flagOf(o.country)}
+                          </span>
+                        ) : null}
                         <span className="font-medium">{o.name}</span>
                         {o.is_default && <Badge variant="secondary" className="text-[10px]">default</Badge>}
                       </div>
@@ -433,7 +251,12 @@ export function Settings() {
                         <Badge variant={o.status === "up" ? "success" : "destructive"}>
                           {o.status === "up" ? "Up" : o.status === "disabled" ? "Pending" : "Down"}
                         </Badge>
-                        {o.removable && <DeleteOutboundButton name={o.id} label={o.name} users={o.users} />}
+                        {o.removable && (
+                          <>
+                            <EditOutboundDialog current={o.id} country={o.country ?? ""} />
+                            <DeleteOutboundButton name={o.id} users={o.users} />
+                          </>
+                        )}
                       </div>
                     </div>
                     <p className="mt-2 text-xs text-muted-foreground">{o.description}</p>

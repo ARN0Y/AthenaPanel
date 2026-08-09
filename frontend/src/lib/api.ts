@@ -285,6 +285,7 @@ export interface OutboundStatus {
   active: number | null;   // live IPs currently routed, null for direct
   is_default: boolean;
   removable?: boolean;     // false for the built-in direct / warp
+  country?: string;        // ISO alpha-2, "" for no flag
   endpoint?: string;
   mtu?: number;
   created_at?: string | null;
@@ -457,8 +458,13 @@ export const api = {
   updateSettings: (p: PanelSettingsPayload) =>
     request<ServerSettings>("/api/settings", { method: "PUT", body: JSON.stringify(p) }),
   outbounds: () => request<OutboundStatus[]>("/api/settings/outbounds"),
-  outboundCreate: (body: { name: string; label?: string; note?: string; port?: number; mtu?: number }) =>
+  outboundCreate: (body: { name: string; country?: string; note?: string; port?: number; mtu?: number }) =>
     request<OutboundCreated>("/api/settings/outbounds", { method: "POST", body: JSON.stringify(body) }),
+  outboundUpdate: (name: string, body: { name?: string; country?: string }) =>
+    request<{ ok: boolean; name: string; country: string; renamed: boolean }>(
+      `/api/settings/outbounds/${encodeURIComponent(name)}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    ),
   outboundRegister: (name: string, registration: string) =>
     request<{ ok: boolean; name: string; endpoint: string }>(
       `/api/settings/outbounds/${encodeURIComponent(name)}/register`,

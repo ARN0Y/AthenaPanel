@@ -454,6 +454,11 @@ class Outbound(Base):
     # well under IFNAMSIZ (16 including the NUL) and validated to [a-z0-9-].
     name: Mapped[str] = mapped_column(String(12), unique=True, index=True, nullable=False)
     label: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    # ISO 3166-1 alpha-2, lowercase, or "" for none. Purely cosmetic — the panel
+    # renders it as a flag next to the name. Stored as the code rather than the
+    # emoji so it stays sortable, searchable and safe to put in a URL, and so a
+    # client that cannot render the emoji can still show something sensible.
+    country: Mapped[str] = mapped_column(String(2), default="", nullable=False)
     kind: Mapped[str] = mapped_column(String(16), default="wireguard", nullable=False)
 
     # The remote end.

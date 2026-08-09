@@ -434,7 +434,10 @@ async def status(db: AsyncSession) -> list[dict]:
         out.append(
             {
                 "id": ob.name,
-                "name": ob.label or ob.name,
+                # The slug IS the display name. There is deliberately no second
+                # "label" field to keep in sync with it.
+                "name": ob.name,
+                "country": ob.country,
                 "kind": ob.kind,
                 "description": ob.note or f"WireGuard tunnel to {ob.endpoint}",
                 "status": "up" if ip else ("disabled" if not ob.enabled else "down"),

@@ -114,6 +114,9 @@ _PG_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     # added egress locations arrived, and a location's name no longer fits in 16.
     # ALTER TYPE rather than ADD COLUMN, so it gets its own step below.
     ("users", "l2tp_mode", "VARCHAR(8) NOT NULL DEFAULT 'ipsec'"),
+    # Flag shown beside an egress location's name. Cosmetic, hence the empty
+    # default rather than a backfill.
+    ("outbounds", "country", "VARCHAR(2) NOT NULL DEFAULT ''"),
     # Multi-node: every session / sample / ledger row records which server
     # produced it. Existing rows are all from this server, so DEFAULT 1 is the
     # correct backfill and needs no data migration.

@@ -9,7 +9,13 @@ from ..config import settings
 from ..database import get_session
 from ..deps import require_admin, require_superadmin
 from ..models import Admin, Outbound, User
-from ..schemas import OutboundCreate, OutboundRegister, PanelSettingsUpdate, SettingsOut
+from ..schemas import (
+    OutboundCreate,
+    OutboundRegister,
+    OutboundUpdate,
+    PanelSettingsUpdate,
+    SettingsOut,
+)
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -124,9 +130,13 @@ async def create_outbound(
     private_key, public_key = outbound.generate_keypair()
     psk = outbound.generate_psk()
 
+    country = (payload.country or "").strip().lower()
+    if country and (len(country) != 2 or not country.isalpha()):
+        raise HTTPException(status_code=400, detail="Country must be a two-letter code, or empty.")
+
     ob = Outbound(
         name=name,
-        label=(payload.label or name).strip()[:64],
+        country=country,
         note=(payload.note or "").strip(),
         private_key=private_key,
         preshared_key=psk,
@@ -195,6 +205,78 @@ async def register_outbound(
     await audit.record(db, "outbound_register", name, ob.endpoint, actor=admin.username)
     await db.commit()
     return {"ok": True, "name": ob.name, "endpoint": ob.endpoint}
+
+
+@router.patch("/outbounds/{name}", dependencies=[Depends(require_superadmin)])
+async def update_outbound(
+    name: str,
+    payload: OutboundUpdate,
+    admin: Admin = Depends(require_superadmin),
+    db: AsyncSession = Depends(get_session),
+):
+    """Rename an outbound and/or change its flag.
+
+    The flag is cosmetic and free. A rename is not: the name IS the interface,
+    the ipset and the config filename, so the old plumbing has to come down and
+    the new go up, and every user pointing at the old name has to move with it —
+    in the same transaction, or a crash in between would strand them on a name
+    that no longer exists.
+
+    Its users fall back to direct for the second the tunnel is being rebuilt.
+    That is the same behaviour as the location briefly going down, which they
+    are already built to survive.
+    """
+    ob = (await db.execute(select(Outbound).where(Outbound.name == name))).scalar_one_or_none()
+    if ob is None:
+        raise HTTPException(status_code=404, detail="No such outbound.")
+
+    if payload.country is not None:
+        country = payload.country.strip().lower()
+        if country and (len(country) != 2 or not country.isalpha()):
+            raise HTTPException(status_code=400, detail="Country must be a two-letter code, or empty.")
+        ob.country = country
+
+    new_name = (payload.name or "").strip().lower()
+    renamed = bool(new_name) and new_name != ob.name
+    if renamed:
+        if not outbound.valid_name(new_name):
+            raise HTTPException(
+                status_code=400,
+                detail="Name must be 2-12 characters of a-z, 0-9 or '-', and not "
+                       "'direct' or 'warp'.",
+            )
+        if (await db.execute(select(Outbound).where(Outbound.name == new_name))).scalar_one_or_none():
+            raise HTTPException(status_code=409, detail=f"An outbound named '{new_name}' already exists.")
+
+    old_name = ob.name
+    if renamed:
+        await db.execute(
+            update(User).where(User.outbound == old_name).values(outbound=new_name)
+        )
+        ob.name = new_name
+    await audit.record(
+        db, "outbound_update", old_name,
+        f"-> {new_name}" if renamed else f"country={ob.country or '-'}",
+        actor=admin.username,
+    )
+    await db.commit()
+    await db.refresh(ob)
+
+    if renamed:
+        await outbound.plumb_down(old_name)
+        if ob.enabled and ob.public_key:
+            ok, out = await outbound.plumb_up(ob)
+            if not ok:
+                ob.enabled = False
+                ob.last_status = "error"
+                await db.commit()
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Renamed, but the tunnel would not come back up: {out.strip()[-300:]}",
+                )
+    await outbound.refresh_known(db)
+    await outbound.reconcile(db)
+    return {"ok": True, "name": ob.name, "country": ob.country, "renamed": renamed}
 
 
 @router.delete("/outbounds/{name}", dependencies=[Depends(require_superadmin)])

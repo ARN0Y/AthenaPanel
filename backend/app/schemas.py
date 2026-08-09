@@ -412,9 +412,12 @@ class NodeOut(BaseModel):
 # ---- Outbounds (operator-added egress locations) ----
 class OutboundCreate(BaseModel):
     # Names the interface (ob-<name>) and the ipset, so it is short and
-    # restricted; validated properly in outbound.valid_name().
+    # restricted; validated properly in outbound.valid_name(). It is also what
+    # the operator sees — there is no separate display name, because two names
+    # for one thing is a question nobody wants to answer twice.
     name: str = Field(min_length=2, max_length=12)
-    label: str = ""
+    # ISO 3166-1 alpha-2, or "" for no flag.
+    country: str = ""
     note: str = ""
     port: int = Field(default=51833, ge=1, le=65535)
     # 1380 = 1500 - 60 (WireGuard) - 60 of headroom for whatever the egress
@@ -426,3 +429,11 @@ class OutboundRegister(BaseModel):
     """The single line athena-outbound.sh prints when it finishes."""
 
     registration: str
+
+
+class OutboundUpdate(BaseModel):
+    """Both optional: None means "leave it alone", which is what lets the flag
+    be cleared (empty string) without that reading as "no change"."""
+
+    name: str | None = Field(default=None, max_length=12)
+    country: str | None = Field(default=None, max_length=2)
