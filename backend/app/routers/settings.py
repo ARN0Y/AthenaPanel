@@ -139,9 +139,9 @@ async def create_outbound(
         enabled=False,  # a reservation until the remote registers
     )
     db.add(ob)
+    await audit.record(db, "outbound_create", name, actor=admin.username)
     await db.commit()
     await db.refresh(ob)
-    await audit.record(db, admin, "outbound.create", target=name)
 
     return {
         "name": ob.name,
@@ -192,7 +192,8 @@ async def register_outbound(
         )
     await outbound.refresh_known(db)
     await outbound.reconcile(db)
-    await audit.record(db, admin, "outbound.register", target=name, detail=ob.endpoint)
+    await audit.record(db, "outbound_register", name, ob.endpoint, actor=admin.username)
+    await db.commit()
     return {"ok": True, "name": ob.name, "endpoint": ob.endpoint}
 
 
@@ -219,10 +220,10 @@ async def delete_outbound(
         )
     ).rowcount or 0
     await db.delete(ob)
+    await audit.record(db, "outbound_delete", name, f"{moved} user(s) -> direct", actor=admin.username)
     await db.commit()
 
     await outbound.plumb_down(name)
     await outbound.refresh_known(db)
     await outbound.reconcile(db)
-    await audit.record(db, admin, "outbound.delete", target=name, detail=f"{moved} user(s) -> direct")
     return {"ok": True, "moved_to_direct": moved}
