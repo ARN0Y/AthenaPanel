@@ -90,11 +90,18 @@ up)
     #
     # AllowedIPs 0.0.0.0/0 is what makes this a default route FOR THIS TABLE
     # only — combined with Table = off it steers nothing but marked packets.
-    # The priority comment is not decoration: outbound-health.sh re-adds this
-    # rule after an outage and has to put it back at the same priority, or the
-    # locations would silently reorder relative to each other.
+    # These three comments are load-bearing, not documentation.
+    #
+    # When the interface bounces, the kernel drops every route that pointed at
+    # it — including the default route in our own table. outbound-health.sh has
+    # to rebuild that route and re-add the rule at the SAME priority, and it
+    # cannot read either number back from a routing table that is now empty.
+    # This file is where it learns them. Without it a location that restarts
+    # can never route again until someone runs this script by hand.
     cat > "$CONF" <<CONF
 # Managed by the panel (outbound '${NAME}'). Hand edits will be overwritten.
+# mark: ${MARK}
+# table: ${TABLE}
 # priority: ${PRIORITY}
 [Interface]
 PrivateKey = ${PRIVATE_KEY}
