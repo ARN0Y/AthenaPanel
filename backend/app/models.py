@@ -495,3 +495,58 @@ class Outbound(Base):
     @property
     def ipset(self) -> str:
         return f"ob-{self.name}"
+
+
+class ApiKey(Base):
+    """A programmatic credential for an existing admin.
+
+    A key is NOT a second permission system. It authenticates AS an admin, so
+    every ownership rule in rbac.py applies to it unchanged — a reseller's key
+    sees exactly the accounts that reseller sees, and nothing anywhere had to
+    learn about keys to make that true. Scopes can only NARROW what that admin
+    could already do; they can never widen it.
+
+    The secret is stored as a SHA-256 hash. It is shown once, at creation, and
+    is unrecoverable afterwards — a leaked key is replaced, not looked up.
+    bcrypt would be the reflex here and is the wrong tool: these are verified on
+    every API request, and 100ms of deliberate KDF cost per call is a self-
+    inflicted rate limit. A 32-byte random secret has no dictionary to attack,
+    which is what makes a fast hash sufficient.
+
+    `prefix` is the first characters of the key, stored in clear so the operator
+    can tell which key a log line or a revocation request refers to.
+    """
+
+    __tablename__ = "api_keys"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    admin_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    prefix: Mapped[str] = mapped_column(String(16), index=True, nullable=False)
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    # Space-separated scope names; empty means "everything this admin can do".
+    scopes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    # Written at most once a minute rather than on every request: it exists to
+    # answer "is this key still in use", which does not need second precision
+    # and is not worth a write on the hot path.
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    request_count: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    # Requests per minute. 0 means the panel-wide default.
+    rate_limit: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    note: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    @property
+    def is_expired(self) -> bool:
+        if self.expires_at is None:
+            return False
+        exp = self.expires_at
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        return exp < _utcnow()
+
+    @property
+    def scope_set(self) -> set[str]:
+        return {s for s in (self.scopes or "").split() if s}

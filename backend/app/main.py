@@ -15,6 +15,7 @@ from .models import LOCAL_NODE_ID, Admin, AppSetting, User, WgPeer
 from .models import Session as SessionRow
 from .routers import (
     admins,
+    apikeys as apikeys_router,
     auth,
     backups as backups_router,
     events,
@@ -27,6 +28,7 @@ from .routers import (
     system,
     traffic,
     users,
+    v1 as v1_router,
     wireguard as wireguard_router,
 )
 from .security import hash_password
@@ -214,6 +216,10 @@ for r in (
     sub_router.router,
     nodes_router.router,
     internal.router,
+    apikeys_router.router,
+    # The public, versioned surface. Last so it is obvious it is additive: it
+    # shares the service layer with everything above and owns none of it.
+    v1_router.router,
 ):
     app.include_router(r)
 

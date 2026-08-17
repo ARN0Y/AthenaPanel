@@ -437,3 +437,143 @@ class OutboundUpdate(BaseModel):
 
     name: str | None = Field(default=None, max_length=12)
     country: str | None = Field(default=None, max_length=2)
+
+
+# ---- Public API v1 ----
+#
+# Separate from the panel's internal schemas on purpose. The frontend and the
+# backend ship together and can change shape in one commit; a bot cannot. These
+# are the contract, and they are allowed to be duller and more explicit than
+# what the UI uses — bytes are accompanied by gigabytes, timestamps are always
+# ISO-8601 UTC, and nothing is omitted just because the UI happens to know it.
+class ApiKeyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    scopes: list[str] = Field(default_factory=list)
+    expires_at: datetime | None = None
+    rate_limit: int = Field(default=0, ge=0, le=100_000)
+    note: str = ""
+
+
+class ApiKeyOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    prefix: str
+    scopes: list[str] = Field(default_factory=list)
+    is_active: bool
+    created_at: datetime
+    expires_at: datetime | None = None
+    last_used_at: datetime | None = None
+    request_count: int = 0
+    rate_limit: int = 0
+    note: str = ""
+    owner: str = ""
+
+
+class ApiKeyCreated(ApiKeyOut):
+    """Only ever returned once, by the create call."""
+
+    key: str
+
+
+class V1UserOut(BaseModel):
+    """A VPN account as the public API describes it."""
+
+    username: str
+    password: str
+    enabled: bool
+    online: bool
+    # Quota. limit_bytes 0 means unlimited; the *_gb mirrors exist so a bot can
+    # render a number without doing byte arithmetic in three places.
+    limit_bytes: int
+    limit_gb: float
+    used_bytes: int
+    used_gb: float
+    remaining_bytes: int | None      # None when unlimited
+    remaining_gb: float | None
+    usage_percent: float | None
+    quota_exceeded: bool
+    # Time
+    expires_at: datetime | None
+    days_remaining: int | None
+    expired: bool
+    created_at: datetime
+    last_seen: datetime | None
+    total_sessions: int
+    # Placement and policy
+    node_id: int
+    node_name: str
+    outbound: str
+    l2tp_mode: str
+    rate_up_kbps: int
+    rate_down_kbps: int
+    note: str
+    owner: str
+    # Everything a client needs to connect, resolved for THIS user's node.
+    endpoints: dict = Field(default_factory=dict)
+    subscription_url: str = ""
+
+
+class V1UserCreate(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    # Omit to have one generated — the common case for a bot handing out
+    # accounts, and better than every bot author inventing their own generator.
+    password: str | None = Field(default=None, max_length=256)
+    limit_gb: float = Field(default=0, ge=0)
+    duration_days: int | None = Field(default=None, ge=0)
+    expires_at: datetime | None = None
+    enabled: bool = True
+    node_id: int | None = None
+    outbound: str | None = None
+    l2tp_mode: str | None = None
+    rate_up_kbps: int = Field(default=0, ge=0)
+    rate_down_kbps: int = Field(default=0, ge=0)
+    note: str = ""
+
+
+class V1UserUpdate(BaseModel):
+    password: str | None = Field(default=None, max_length=256)
+    limit_gb: float | None = Field(default=None, ge=0)
+    expires_at: datetime | None = None
+    enabled: bool | None = None
+    node_id: int | None = None
+    outbound: str | None = None
+    l2tp_mode: str | None = None
+    rate_up_kbps: int | None = Field(default=None, ge=0)
+    rate_down_kbps: int | None = Field(default=None, ge=0)
+    note: str | None = None
+
+
+class V1Extend(BaseModel):
+    """Add to an account rather than set it — the operation a renewal actually
+    is. Setting an absolute value races with the customer's clock; adding does
+    not."""
+
+    days: int = Field(default=0, ge=0, le=3650)
+    gb: float = Field(default=0, ge=0)
+    reset_usage: bool = False
+
+
+class V1SessionOut(BaseModel):
+    username: str
+    node_id: int
+    node_name: str
+    ifname: str
+    protocol: str
+    peer_ip: str
+    started_at: datetime | None
+    duration_seconds: int
+    bytes_in: int
+    bytes_out: int
+    bytes_total: int
+
+
+class V1Page(BaseModel):
+    """Every list in this API answers with the same envelope."""
+
+    items: list = Field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    page_size: int = 50
+    pages: int = 1
