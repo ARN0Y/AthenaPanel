@@ -5,7 +5,6 @@ import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/hooks/useAuth";
@@ -109,8 +108,6 @@ function SignInCard({
   setUsername,
   password,
   setPassword,
-  remember,
-  setRemember,
   standalone,
 }: {
   brand: Branding;
@@ -120,8 +117,6 @@ function SignInCard({
   setUsername: (v: string) => void;
   password: string;
   setPassword: (v: string) => void;
-  remember: boolean;
-  setRemember: (v: boolean) => void;
   standalone: boolean;
 }) {
   return (
@@ -137,7 +132,7 @@ function SignInCard({
         <p className="mt-1.5 text-sm text-muted-foreground">{brand.login_tagline}</p>
       )}
 
-      <form onSubmit={onSubmit} className="mt-8 space-y-5">
+      <form onSubmit={onSubmit} className="mt-8 space-y-4">
         <div className="space-y-2">
           <Label
             htmlFor="username"
@@ -152,7 +147,8 @@ function SignInCard({
             onChange={(e) => setUsername(e.target.value)}
             required
             autoFocus
-            className="h-10 rounded-none border-0 border-b border-border/70 bg-transparent px-0 text-[15px] focus-visible:border-foreground focus-visible:ring-0"
+            className="h-11 rounded-lg border border-border/70 bg-background/60 px-3.5 text-[15px] transition-colors placeholder:text-muted-foreground/50 focus-visible:border-primary/70 focus-visible:bg-background focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:ring-offset-0"
+            placeholder="admin"
           />
         </div>
 
@@ -172,25 +168,15 @@ function SignInCard({
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
-            className="h-10 rounded-none border-0 border-b border-border/70 bg-transparent px-0 text-[15px] tracking-[0.2em] focus-visible:border-foreground focus-visible:ring-0"
+            className="h-11 rounded-lg border border-border/70 bg-background/60 px-3.5 text-[15px] transition-colors placeholder:text-muted-foreground/50 focus-visible:border-primary/70 focus-visible:bg-background focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:ring-offset-0 tracking-[0.18em] placeholder:tracking-normal"
+            placeholder="••••••••"
           />
         </div>
-
-        <label className="flex cursor-pointer items-center gap-2.5 pt-1">
-          <Checkbox
-            checked={remember}
-            onCheckedChange={(v) => setRemember(v === true)}
-            aria-label="Keep me signed in"
-          />
-          <span className="text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
-            Keep me signed in
-          </span>
-        </label>
 
         <Button
           type="submit"
           disabled={loading}
-          className="group h-11 w-full rounded-lg text-[11px] font-semibold uppercase tracking-[0.18em]"
+          className="group mt-2 h-11 w-full rounded-lg text-[11px] font-semibold uppercase tracking-[0.18em]"
         >
           {loading ? (
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -211,7 +197,6 @@ export function Login() {
   const navigate = useNavigate();
   const [username, setUsername] = React.useState("");
   const [password, setPassword] = React.useState("");
-  const [remember, setRemember] = React.useState(false);
   const [loading, setLoading] = React.useState(false);
 
   const { data } = useQuery({
@@ -230,7 +215,7 @@ export function Login() {
     e.preventDefault();
     setLoading(true);
     try {
-      await login(username, password, remember);
+      await login(username, password);
       navigate("/", { replace: true });
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Login failed");
@@ -249,16 +234,7 @@ export function Login() {
       setUsername={setUsername}
       password={password}
       setPassword={setPassword}
-      remember={remember}
-      setRemember={setRemember}
     />
-  );
-
-  const footer = (
-    <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-muted-foreground/60">
-      <span className="h-1 w-1 rounded-full bg-success" />
-      Athena Panel · v3.0
-    </div>
   );
 
   // ---- centred / backdrop: one column, artwork behind everything ----
@@ -271,7 +247,6 @@ export function Login() {
             <BrandMark name={brand.brand_name} />
           </div>
           {card(true)}
-          <div className="mt-8">{footer}</div>
         </div>
       </div>
     );
@@ -291,7 +266,6 @@ export function Login() {
         <div className="relative flex flex-col justify-between px-6 py-10 sm:px-12 lg:px-16 xl:px-24">
           <BrandMark name={brand.brand_name} />
           <div className="flex flex-1 items-center py-12">{card(false)}</div>
-          {footer}
 
           {/* The rule the operator asked for. Only on the seam between the two
               columns, and only once they are actually side by side. */}

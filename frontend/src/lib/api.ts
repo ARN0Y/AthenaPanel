@@ -3,19 +3,19 @@
 const TOKEN_KEY = "vpn_panel_token";
 
 /**
- * "Keep me signed in" is the choice between the two stores: sessionStorage is
- * emptied when the tab closes, localStorage is not. Reads check both, and every
- * write clears the other, so a session can never be held in both at once and
- * outlive the choice the operator made.
+ * A signed-in session persists until the token expires.
+ *
+ * Reads and clears still cover sessionStorage: a build shipped briefly with a
+ * "keep me signed in" toggle that put tokens there, and anyone holding one
+ * should stay signed in and be able to sign out normally rather than being
+ * stranded with a token nothing can see.
  */
 export function getToken(): string | null {
-  return sessionStorage.getItem(TOKEN_KEY) ?? localStorage.getItem(TOKEN_KEY);
+  return localStorage.getItem(TOKEN_KEY) ?? sessionStorage.getItem(TOKEN_KEY);
 }
-export function setToken(token: string, persist = true) {
-  const store = persist ? localStorage : sessionStorage;
-  const other = persist ? sessionStorage : localStorage;
-  other.removeItem(TOKEN_KEY);
-  store.setItem(TOKEN_KEY, token);
+export function setToken(token: string) {
+  sessionStorage.removeItem(TOKEN_KEY);
+  localStorage.setItem(TOKEN_KEY, token);
 }
 export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
