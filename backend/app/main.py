@@ -142,7 +142,6 @@ async def _seed_local_node() -> None:
         await db.commit()
 
 
-@asynccontextmanager
 async def _adopt_legacy_branding() -> None:
     image_id = branding.adopt_legacy()
     if not image_id:
@@ -155,6 +154,7 @@ async def _adopt_legacy_branding() -> None:
     log.info("branding: adopted the previous login image as %s", image_id)
 
 
+@asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     try:
