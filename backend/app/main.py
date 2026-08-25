@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, select
 
-from . import chap_secrets, outbound, wireguard
+from . import appsettings, branding, chap_secrets, outbound, wireguard
 from .config import settings
 from .database import AsyncSessionLocal, init_db
 from .models import LOCAL_NODE_ID, Admin, AppSetting, User, WgPeer
@@ -143,6 +143,18 @@ async def _seed_local_node() -> None:
 
 
 @asynccontextmanager
+async def _adopt_legacy_branding() -> None:
+    image_id = branding.adopt_legacy()
+    if not image_id:
+        return
+    async with AsyncSessionLocal() as db:
+        values = await appsettings.get_all(db)
+        if (values.get("login_image_id") or "").strip():
+            return  # the operator already picked something newer
+        await appsettings.update(db, {"login_image_id": image_id})
+    log.info("branding: adopted the previous login image as %s", image_id)
+
+
 async def lifespan(app: FastAPI):
     await init_db()
     try:
@@ -160,6 +172,13 @@ async def lifespan(app: FastAPI):
         await _snapshot_once()
     except Exception:  # noqa: BLE001
         log.exception("initial snapshot failed")
+
+    # Carry a pre-library login image into the library. One-shot and idempotent:
+    # once the file is renamed to its content id there is nothing left to find.
+    try:
+        await _adopt_legacy_branding()
+    except Exception:  # noqa: BLE001
+        log.exception("branding migration failed")
 
     # Re-apply outbound mappings for sessions that survived the restart, and
     # learn the operator's egress locations before the first request arrives —

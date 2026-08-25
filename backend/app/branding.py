@@ -181,6 +181,37 @@ def remove(image_id: str) -> bool:
     return True
 
 
+# The single-slot scheme that shipped before the library: one file called
+# login-image.<ext> and a version stamp in app_settings.
+_LEGACY_STEM = "login-image"
+
+
+def adopt_legacy() -> str | None:
+    """Fold a pre-library image into the library and return its new id.
+
+    Without this the operator's wallpaper is still on disk but invisible: the
+    library only lists files whose name is a content id, so a deploy would
+    silently blank the login page and the only way back would be to find the
+    original file and upload it again.
+    """
+    d = directory()
+    if not d.is_dir():
+        return None
+    for ext in CONTENT_TYPES.values():
+        old = d / f"{_LEGACY_STEM}{ext}"
+        if not old.is_file():
+            continue
+        blob = old.read_bytes()
+        image_id = hashlib.sha256(blob).hexdigest()[:_ID_LEN]
+        target = d / f"{image_id}{ext}"
+        if target.exists():
+            old.unlink()  # already adopted on an earlier start
+        else:
+            old.rename(target)
+        return image_id
+    return None
+
+
 def public_view(values: dict[str, str]) -> dict:
     """The cosmetic subset served to an unauthenticated browser."""
     layout = values.get("login_layout", "split-right")
