@@ -155,19 +155,16 @@ export function BrandingCard() {
             <div className="relative aspect-[16/7] w-full">
               {split ? (
                 <div className={cn("grid h-full grid-cols-2", !imageRight && "[&>*:first-child]:order-2")}>
-                  <div className="relative flex flex-col justify-between p-4">
+                  <div className="relative flex flex-col p-4">
                     <div className="text-[9px] font-semibold uppercase tracking-[0.28em] text-foreground/80">
                       {brandName || "ATHENA"}
                     </div>
-                    <div className="space-y-1.5">
+                    <div className="flex flex-1 flex-col justify-center space-y-1.5">
                       <div className="text-[13px] font-semibold">Sign in</div>
                       <div className="truncate text-[9px] text-muted-foreground">{tagline}</div>
-                      <div className="mt-2 h-[3px] w-4/5 rounded-full bg-muted-foreground/25" />
-                      <div className="h-[3px] w-4/5 rounded-full bg-muted-foreground/25" />
+                      <div className="mt-2 h-[6px] w-4/5 rounded-[2px] border border-border/70" />
+                      <div className="h-[6px] w-4/5 rounded-[2px] border border-border/70" />
                       <div className="mt-1.5 h-[9px] w-2/5 rounded-[3px] bg-foreground/80" />
-                    </div>
-                    <div className="text-[7px] uppercase tracking-widest text-muted-foreground/50">
-                      Athena Panel
                     </div>
                     <div
                       className={cn(
