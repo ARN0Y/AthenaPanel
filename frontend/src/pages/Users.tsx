@@ -20,6 +20,7 @@ import {
   Search,
   Server,
   Trash2,
+  UserCog,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -184,9 +185,20 @@ export function Users() {
     onError: (e) => toast.error(e instanceof ApiError ? e.message : "Reset failed"),
   });
   const bulkMut = useMutation({
-    mutationFn: ({ ids, action }: { ids: number[]; action: BulkActionType }) => api.bulk(ids, action),
+    mutationFn: ({ ids, action, ownerAdminId }: { ids: number[]; action: BulkActionType; ownerAdminId?: number }) =>
+      api.bulk(ids, action, ownerAdminId),
     onSuccess: (res) => { toast.success(`${res.action}: ${res.affected.length} user(s)`); setSelected(new Set()); invalidate(); },
     onError: (e) => toast.error(e instanceof ApiError ? e.message : "Bulk action failed"),
+  });
+
+  // Candidate owners for the bulk hand-over. Superadmin-only in both
+  // directions: the endpoint refuses a reseller and the control is hidden
+  // from one.
+  const { data: admins = [] } = useQuery({
+    queryKey: ["admins"],
+    queryFn: api.listAdmins,
+    enabled: isSuperadmin,
+    retry: false,
   });
 
   const creators = React.useMemo(
@@ -420,6 +432,47 @@ export function Users() {
                 <Button variant="outline" size="sm" onClick={() => bulkMut.mutate({ ids, action: "reset-quota" })}>
                   <RotateCcw className="h-4 w-4" /> Reset quota
                 </Button>
+                {isSuperadmin && admins.length > 1 && (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="outline" size="sm">
+                        <UserCog className="h-4 w-4" /> Assign to
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="max-h-72 overflow-y-auto">
+                      {admins
+                        .filter((a) => a.is_active)
+                        .map((a) => (
+                          <DropdownMenuItem
+                            key={a.id}
+                            onClick={() =>
+                              setConfirm({
+                                title: `Hand ${selected.size} account(s) to ${a.username}?`,
+                                description:
+                                  a.role === "superadmin"
+                                    ? "They will manage these accounts from now on. Nothing is disconnected."
+                                    : `${a.username} currently holds ${a.user_count}` +
+                                      (a.max_users > 0 ? ` of ${a.max_users}` : "") +
+                                      ". Nothing is disconnected.",
+                                confirmLabel: "Assign",
+                                action: () =>
+                                  bulkMut.mutate({ ids, action: "assign", ownerAdminId: a.id }),
+                              })
+                            }
+                          >
+                            {a.username}
+                            <span className="ml-auto pl-3 text-xs text-muted-foreground">
+                              {a.role === "superadmin"
+                                ? "superadmin"
+                                : a.max_users > 0
+                                  ? `${a.user_count}/${a.max_users}`
+                                  : a.user_count}
+                            </span>
+                          </DropdownMenuItem>
+                        ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                )}
                 <Button
                   variant="destructive"
                   size="sm"

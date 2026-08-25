@@ -108,6 +108,8 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     username: str = Field(min_length=1, max_length=128)
     password: str = Field(min_length=1, max_length=256)
+    # Superadmin only: create the account already owned by a reseller.
+    owner_admin_id: int | None = None
 
 
 class UserUpdate(BaseModel):
@@ -121,6 +123,8 @@ class UserUpdate(BaseModel):
     outbound: str | None = None
     l2tp_mode: str | None = None
     node_id: int | None = None
+    # Superadmin only: hand this account to another operator.
+    owner_admin_id: int | None = None
 
 
 class UserOut(BaseModel):
@@ -161,9 +165,34 @@ class UserOut(BaseModel):
     endpoint_wg: str = ""
 
 
+# ---- Login-page appearance ----
+class BrandingOut(BaseModel):
+    """Served unauthenticated — cosmetic fields only. See branding.py."""
+
+    brand_name: str = "ATHENA"
+    login_tagline: str = ""
+    login_layout: str = "split-right"
+    login_focal: str = "center"
+    login_overlay: int = 45
+    login_image_url: str = ""
+    has_image: bool = False
+    login_image_version: str = "0"
+
+
+class BrandingUpdate(BaseModel):
+    brand_name: str | None = Field(default=None, max_length=48)
+    login_tagline: str | None = Field(default=None, max_length=160)
+    login_layout: str | None = None
+    login_focal: str | None = None
+    login_overlay: int | None = None
+    login_image_url: str | None = Field(default=None, max_length=512)
+
+
 class BulkAction(BaseModel):
     ids: list[int]
-    action: str  # "enable" | "disable" | "delete" | "reset-quota"
+    action: str  # "enable" | "disable" | "delete" | "reset-quota" | "assign"
+    # Required by "assign": the operator the selected accounts move to.
+    owner_admin_id: int | None = None
 
 
 # ---- Sessions ----

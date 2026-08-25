@@ -28,6 +28,7 @@ _FIELD_LABELS = {
     "outbound": "outbound",
     "l2tp_mode": "L2TP mode",
     "node_id": "node",
+    "owner_admin_id": "owner",
     "username": "username",
     "password": "password",
 }
@@ -222,6 +223,41 @@ async def _validate_node(db: AsyncSession, node_id: int | None) -> int | None:
     return node_id
 
 
+async def _resolve_owner(
+    db: AsyncSession, actor: Admin, owner_admin_id: int | None, incoming: int
+) -> Admin:
+    """Validate a transfer target and prove it has room for `incoming` accounts.
+
+    Only a superadmin may set an owner: a reseller who could would either hand
+    their accounts away to escape their own cap, or take someone else's.
+
+    The cap matters here specifically. `max_users` is checked when a reseller
+    creates an account, so without the same check on transfer the operator could
+    push a reseller far past the limit they were given and nobody would notice
+    until the reseller tried to create their next account and was refused while
+    already over.
+    """
+    if not actor.is_superadmin:
+        raise HTTPException(status_code=403, detail="Only a superadmin can change an account's owner")
+    target = await db.get(Admin, owner_admin_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="No such admin")
+    if not target.is_active:
+        raise HTTPException(status_code=400, detail=f"{target.username} is disabled and cannot own accounts")
+    if not target.is_superadmin and target.max_users > 0:
+        held = (await db.execute(
+            select(func.count(User.id)).where(User.created_by_admin_id == target.id)
+        )).scalar_one()
+        if held + incoming > target.max_users:
+            room = max(0, target.max_users - held)
+            raise HTTPException(
+                status_code=403,
+                detail=(f"{target.username} may hold {target.max_users} accounts and already has "
+                        f"{held} — room for {room}, not {incoming}"),
+            )
+    return target
+
+
 def _owns(admin: Admin, user: User) -> bool:
     return admin.is_superadmin or user.created_by_admin_id == admin.id
 
@@ -231,7 +267,9 @@ async def _require_owned(db: AsyncSession, admin: Admin, user_id: int) -> User:
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     if not _owns(admin, user):
-        raise HTTPException(status_code=403, detail="Not your user")
+        # Deliberately indistinguishable from "no such id" — a 403 here would
+        # confirm the account exists to an admin who may not see it.
+        raise HTTPException(status_code=404, detail="User not found")
     return user
 
 
@@ -267,6 +305,10 @@ async def create_user(
     if exists.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Username already exists")
 
+    owner = admin
+    if payload.owner_admin_id is not None and payload.owner_admin_id != admin.id:
+        owner = await _resolve_owner(db, admin, payload.owner_admin_id, 1)
+
     user = User(
         username=payload.username,
         password_hash=payload.password,
@@ -278,10 +320,13 @@ async def create_user(
         note=payload.note or "",
         outbound=_validate_outbound(payload.outbound),
         l2tp_mode=_norm_mode(payload.l2tp_mode),
-        created_by_admin_id=admin.id,
+        created_by_admin_id=owner.id,
     )
     db.add(user)
-    await audit.record(db, "create_user", payload.username, _describe_create(user), actor=admin.username)
+    detail = _describe_create(user)
+    if owner.id != admin.id:
+        detail += f", owner={owner.username}"
+    await audit.record(db, "create_user", payload.username, detail, actor=admin.username)
     await db.commit()
     await db.refresh(user)
     await chap_secrets.rewrite(db)
@@ -319,6 +364,17 @@ async def update_user(
     if new_password:
         user.password_hash = new_password
         changes.append("password (changed)")
+
+    # Ownership is handled apart from the generic loop below: the API field and
+    # the column have different names, and the move has to be authorised and
+    # capacity-checked before anything else on the account is touched.
+    new_owner_id = data.pop("owner_admin_id", None)
+    if new_owner_id is not None and new_owner_id != user.created_by_admin_id:
+        target = await _resolve_owner(db, admin, new_owner_id, 1)
+        names = await _admin_names(db)
+        was = names.get(user.created_by_admin_id or -1, "—")
+        changes.append(f"owner: {was} → {target.username}")
+        user.created_by_admin_id = target.id
     for field, new_value in data.items():
         old_value = getattr(user, field, None)
         if old_value == new_value:
@@ -388,13 +444,22 @@ async def bulk_action(
     admin: Admin = Depends(get_current_admin),
     db: AsyncSession = Depends(get_session),
 ):
-    if payload.action not in {"enable", "disable", "delete", "reset-quota"}:
+    if payload.action not in {"enable", "disable", "delete", "reset-quota", "assign"}:
         raise HTTPException(status_code=400, detail="Unknown action")
 
     stmt = select(User).where(User.id.in_(payload.ids))
     if not admin.is_superadmin:
         stmt = stmt.where(User.created_by_admin_id == admin.id)
     users = (await db.execute(stmt)).scalars().all()
+
+    target: Admin | None = None
+    if payload.action == "assign":
+        if payload.owner_admin_id is None:
+            raise HTTPException(status_code=400, detail="assign needs owner_admin_id")
+        # Count only the accounts that would actually move, so re-running an
+        # assign that is already partly done cannot fail against the cap.
+        moving = sum(1 for u in users if u.created_by_admin_id != payload.owner_admin_id)
+        target = await _resolve_owner(db, admin, payload.owner_admin_id, moving)
 
     affected = []
     for user in users:
@@ -406,11 +471,16 @@ async def bulk_action(
         elif payload.action == "reset-quota":
             user.used_bytes = 0
             await _rebaseline_open_sessions(db, user.username)
+        elif payload.action == "assign":
+            user.created_by_admin_id = target.id
         elif payload.action == "delete":
             await nodes_mod.terminate_user(db, user)
             await db.delete(user)
 
-    await audit.record(db, f"bulk_{payload.action}", f"{len(affected)} users", ", ".join(affected[:20]), actor=admin.username)
+    detail = ", ".join(affected[:20])
+    if target is not None:
+        detail = f"→ {target.username}: {detail}"
+    await audit.record(db, f"bulk_{payload.action}", f"{len(affected)} users", detail, actor=admin.username)
     await db.commit()
     await chap_secrets.rewrite(db)
     if payload.action == "disable":

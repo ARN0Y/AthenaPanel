@@ -27,6 +27,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { BrandingCard } from "./branding-card";
 import { Separator } from "@/components/ui/separator";
 import { PageHeader } from "@/components/widgets/PageHeader";
 import { useAuth } from "@/hooks/useAuth";
@@ -313,7 +314,7 @@ export function Settings() {
           </Card>
         </TabsContent>
 
-        <TabsContent value="appearance">
+        <TabsContent value="appearance" className="space-y-6">
           <Card className="max-w-lg">
             <CardHeader>
               <CardTitle className="text-base">Theme</CardTitle>
@@ -343,6 +344,11 @@ export function Settings() {
               </div>
             </CardContent>
           </Card>
+
+          {/* The sign-in screen is the operator's, not each admin's: it is one
+              stored setting rather than a per-browser preference like the theme
+              above, so only a superadmin may change it. */}
+          {isSuperadmin && <BrandingCard />}
         </TabsContent>
 
         <TabsContent value="about">

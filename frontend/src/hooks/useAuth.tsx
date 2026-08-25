@@ -8,7 +8,7 @@ interface AuthContextValue {
   me: Me | null;
   isSuperadmin: boolean;
   canCreateUsers: boolean;
-  login: (username: string, password: string) => Promise<void>;
+  login: (username: string, password: string, persist?: boolean) => Promise<void>;
   setSession: (token: string) => Promise<void>;
   refresh: () => Promise<void>;
   logout: () => void;
@@ -41,11 +41,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .finally(() => setLoading(false));
   }, [loadMe]);
 
-  const login = React.useCallback(async (username: string, password: string) => {
-    const res = await api.login(username, password);
-    setToken(res.access_token);
-    await loadMe();
-  }, [loadMe]);
+  const login = React.useCallback(
+    async (username: string, password: string, persist = true) => {
+      const res = await api.login(username, password);
+      setToken(res.access_token, persist);
+      await loadMe();
+    },
+    [loadMe],
+  );
 
   const setSession = React.useCallback(async (token: string) => {
     setToken(token);

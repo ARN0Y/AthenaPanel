@@ -1,35 +1,207 @@
 import * as React from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowRight, Loader2, Lock, User } from "lucide-react";
+import { ArrowRight, Loader2 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/hooks/useAuth";
-import { ApiError } from "@/lib/api";
+import { ApiError, api, brandingImageUrl, type Branding } from "@/lib/api";
 
-function BrandMark() {
+/**
+ * The sign-in screen.
+ *
+ * Its appearance comes from `GET /api/branding`, which is public because this
+ * page renders before anyone has a token. The whole component is built to work
+ * with that request failing: `FALLBACK` is a complete, presentable
+ * configuration, so a backend that is mid-deploy, or older than this build,
+ * shows a plain panel rather than an empty one.
+ */
+
+const FALLBACK: Branding = {
+  brand_name: "ATHENA",
+  login_tagline: "Operator access to the control plane.",
+  login_layout: "split-right",
+  login_focal: "center",
+  login_overlay: 45,
+  login_image_url: "",
+  has_image: false,
+  login_image_version: "0",
+};
+
+function BrandMark({ name }: { name: string }) {
   return (
-    <div className="relative flex h-14 w-14 items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-indigo-500 via-primary to-violet-500 shadow-xl shadow-primary/30 ring-1 ring-white/15">
-      <span className="pointer-events-none absolute inset-x-0 top-0 h-1/2 bg-white/10" />
-      <svg viewBox="0 0 24 24" fill="none" className="relative h-7 w-7">
-        <path
-          d="M12 2.6 4.7 5.4v5.1c0 4.5 3.1 8.2 7.3 9.6 4.2-1.4 7.3-5.1 7.3-9.6V5.4L12 2.6Z"
-          fill="white"
-          fillOpacity="0.16"
-          stroke="white"
-          strokeWidth="1.4"
-          strokeLinejoin="round"
+    <div className="flex items-center gap-2.5">
+      <span className="relative flex h-7 w-7 items-center justify-center">
+        <span className="absolute inset-0 rotate-45 rounded-[7px] border border-foreground/25" />
+        <span className="absolute inset-[9px] rotate-45 rounded-[2px] bg-foreground/80" />
+      </span>
+      <span className="text-[13px] font-semibold uppercase tracking-[0.28em] text-foreground/90">
+        {name}
+      </span>
+    </div>
+  );
+}
+
+/** The artwork panel. Also the centred/backdrop variants' background. */
+function Artwork({
+  brand,
+  className = "",
+  rounded = false,
+}: {
+  brand: Branding;
+  className?: string;
+  rounded?: boolean;
+}) {
+  const src = brandingImageUrl(brand);
+  // Tracked so a broken external URL falls back to the gradient instead of
+  // leaving a dead image frame on the page.
+  const [failed, setFailed] = React.useState(false);
+  React.useEffect(() => setFailed(false), [src]);
+
+  const showImage = Boolean(src) && !failed;
+
+  return (
+    <div className={`overflow-hidden bg-muted ${rounded ? "rounded-2xl" : ""} ${className}`}>
+      {showImage ? (
+        <img
+          src={src}
+          alt=""
+          aria-hidden="true"
+          onError={() => setFailed(true)}
+          className="h-full w-full object-cover"
+          style={{ objectPosition: brand.login_focal }}
         />
-        <path
-          d="M7.7 12.7h2.1l1.2-3.1 1.7 5.2 1.1-2.1h2.4"
-          stroke="white"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
+      ) : (
+        // The built-in look, used when no artwork is set. Deliberately quiet:
+        // it should read as intentional, not as a missing image.
+        <div className="absolute inset-0 bg-[radial-gradient(120%_100%_at_70%_20%,hsl(var(--primary)/0.30),transparent_60%),radial-gradient(90%_80%_at_20%_90%,hsl(var(--primary)/0.14),transparent_55%)]">
+          <div
+            className="absolute inset-0 opacity-40"
+            style={{
+              backgroundImage:
+                "radial-gradient(hsl(var(--foreground)/0.10) 1px, transparent 1px)",
+              backgroundSize: "26px 26px",
+            }}
+          />
+        </div>
+      )}
+      {/* Dim layer. The operator picks the picture, so the panel cannot assume
+          it is dark enough for white text — this is what keeps it readable. */}
+      <div
+        className="absolute inset-0 bg-background"
+        style={{ opacity: brand.login_overlay / 100 }}
+      />
+      {/* A gradient toward the form side, so the seam never looks like a hard cut. */}
+      <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-background/70 via-transparent to-transparent" />
+    </div>
+  );
+}
+
+function SignInCard({
+  brand,
+  onSubmit,
+  loading,
+  username,
+  setUsername,
+  password,
+  setPassword,
+  remember,
+  setRemember,
+  standalone,
+}: {
+  brand: Branding;
+  onSubmit: (e: React.FormEvent) => void;
+  loading: boolean;
+  username: string;
+  setUsername: (v: string) => void;
+  password: string;
+  setPassword: (v: string) => void;
+  remember: boolean;
+  setRemember: (v: boolean) => void;
+  standalone: boolean;
+}) {
+  return (
+    <div
+      className={
+        standalone
+          ? "w-full max-w-[400px] rounded-2xl border border-border/60 bg-card/85 p-7 shadow-2xl shadow-black/30 backdrop-blur-md"
+          : "w-full max-w-[380px]"
+      }
+    >
+      <h1 className="text-[26px] font-semibold tracking-tight">Sign in</h1>
+      {brand.login_tagline && (
+        <p className="mt-1.5 text-sm text-muted-foreground">{brand.login_tagline}</p>
+      )}
+
+      <form onSubmit={onSubmit} className="mt-8 space-y-5">
+        <div className="space-y-2">
+          <Label
+            htmlFor="username"
+            className="text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground"
+          >
+            Username
+          </Label>
+          <Input
+            id="username"
+            autoComplete="username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            required
+            autoFocus
+            className="h-10 rounded-none border-0 border-b border-border/70 bg-transparent px-0 text-[15px] focus-visible:border-foreground focus-visible:ring-0"
+          />
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-baseline justify-between">
+            <Label
+              htmlFor="password"
+              className="text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground"
+            >
+              Password
+            </Label>
+          </div>
+          <Input
+            id="password"
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+            className="h-10 rounded-none border-0 border-b border-border/70 bg-transparent px-0 text-[15px] tracking-[0.2em] focus-visible:border-foreground focus-visible:ring-0"
+          />
+        </div>
+
+        <label className="flex cursor-pointer items-center gap-2.5 pt-1">
+          <Checkbox
+            checked={remember}
+            onCheckedChange={(v) => setRemember(v === true)}
+            aria-label="Keep me signed in"
+          />
+          <span className="text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
+            Keep me signed in
+          </span>
+        </label>
+
+        <Button
+          type="submit"
+          disabled={loading}
+          className="group h-11 w-full rounded-lg text-[11px] font-semibold uppercase tracking-[0.18em]"
+        >
+          {loading ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <>
+              Continue
+              <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
+            </>
+          )}
+        </Button>
+      </form>
     </div>
   );
 }
@@ -39,7 +211,16 @@ export function Login() {
   const navigate = useNavigate();
   const [username, setUsername] = React.useState("");
   const [password, setPassword] = React.useState("");
+  const [remember, setRemember] = React.useState(false);
   const [loading, setLoading] = React.useState(false);
+
+  const { data } = useQuery({
+    queryKey: ["branding"],
+    queryFn: api.branding,
+    staleTime: 5 * 60 * 1000,
+    retry: false, // never leave the sign-in form waiting on decoration
+  });
+  const brand: Branding = { ...FALLBACK, ...(data ?? {}) };
 
   React.useEffect(() => {
     if (isAuthenticated) navigate("/", { replace: true });
@@ -49,8 +230,7 @@ export function Login() {
     e.preventDefault();
     setLoading(true);
     try {
-      await login(username, password);
-      toast.success("Welcome back");
+      await login(username, password, remember);
       navigate("/", { replace: true });
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Login failed");
@@ -59,85 +239,72 @@ export function Login() {
     }
   };
 
-  return (
-    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background p-4">
-      {/* Ambient depth */}
-      <div className="pointer-events-none absolute inset-0">
-        <div className="absolute left-1/2 top-[-10%] h-[38rem] w-[38rem] -translate-x-1/2 rounded-full bg-primary/10 blur-[120px]" />
-        <div className="absolute bottom-[-20%] right-[-10%] h-[30rem] w-[30rem] rounded-full bg-violet-500/10 blur-[120px]" />
-        <div
-          className="absolute inset-0 opacity-[0.4]"
-          style={{
-            backgroundImage:
-              "radial-gradient(hsl(var(--foreground)/0.05) 1px, transparent 1px)",
-            backgroundSize: "22px 22px",
-            maskImage: "radial-gradient(ellipse at center, black, transparent 72%)",
-          }}
-        />
+  const card = (standalone: boolean) => (
+    <SignInCard
+      brand={brand}
+      standalone={standalone}
+      onSubmit={handleSubmit}
+      loading={loading}
+      username={username}
+      setUsername={setUsername}
+      password={password}
+      setPassword={setPassword}
+      remember={remember}
+      setRemember={setRemember}
+    />
+  );
+
+  const footer = (
+    <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-muted-foreground/60">
+      <span className="h-1 w-1 rounded-full bg-success" />
+      Athena Panel · v3.0
+    </div>
+  );
+
+  // ---- centred / backdrop: one column, artwork behind everything ----
+  if (brand.login_layout === "centered" || brand.login_layout === "backdrop") {
+    return (
+      <div className="relative flex min-h-screen items-center justify-center overflow-hidden p-6">
+        <Artwork brand={brand} className="absolute inset-0" />
+        <div className="relative flex w-full max-w-[400px] flex-col items-center">
+          <div className="mb-8">
+            <BrandMark name={brand.brand_name} />
+          </div>
+          {card(true)}
+          <div className="mt-8">{footer}</div>
+        </div>
       </div>
+    );
+  }
 
-      <div className="relative w-full max-w-[380px] animate-in-up">
-        <div className="mb-7 flex flex-col items-center text-center">
-          <BrandMark />
-          <h1 className="mt-4 text-[22px] font-semibold tracking-tight">Athena VPN</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Sign in to continue</p>
+  // ---- split: form on one side, artwork on the other, a rule between ----
+  const imageRight = brand.login_layout !== "split-left";
+
+  return (
+    <div className="relative min-h-screen bg-background">
+      <div
+        className={`grid min-h-screen lg:grid-cols-2 ${
+          imageRight ? "" : "lg:[&>*:first-child]:order-2"
+        }`}
+      >
+        {/* Form side */}
+        <div className="relative flex flex-col justify-between px-6 py-10 sm:px-12 lg:px-16 xl:px-24">
+          <BrandMark name={brand.brand_name} />
+          <div className="flex flex-1 items-center py-12">{card(false)}</div>
+          {footer}
+
+          {/* The rule the operator asked for. Only on the seam between the two
+              columns, and only once they are actually side by side. */}
+          <div
+            className={`pointer-events-none absolute inset-y-0 hidden w-px bg-border/70 lg:block ${
+              imageRight ? "right-0" : "left-0"
+            }`}
+          />
         </div>
 
-        <div className="rounded-2xl border border-border/60 bg-card/80 p-6 shadow-2xl shadow-black/20 backdrop-blur-sm sm:p-7">
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="username" className="text-xs text-muted-foreground">
-                Username
-              </Label>
-              <div className="relative">
-                <User className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  id="username"
-                  className="h-11 pl-9"
-                  autoComplete="username"
-                  placeholder="admin"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  required
-                  autoFocus
-                />
-              </div>
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="password" className="text-xs text-muted-foreground">
-                Password
-              </Label>
-              <div className="relative">
-                <Lock className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  id="password"
-                  type="password"
-                  className="h-11 pl-9"
-                  autoComplete="current-password"
-                  placeholder="••••••••••"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                />
-              </div>
-            </div>
-            <Button type="submit" className="group h-11 w-full text-[13px] font-semibold" disabled={loading}>
-              {loading ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <>
-                  Sign in
-                  <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
-                </>
-              )}
-            </Button>
-          </form>
-        </div>
-
-        <div className="mt-6 flex items-center justify-center gap-2 text-[11px] text-muted-foreground/70">
-          <span className="h-1 w-1 rounded-full bg-success" />
-          Athena Panel · v3.0
-        </div>
+        {/* Artwork side. Hidden on narrow screens: a cropped sliver of a
+            wallpaper above a form is worse than no wallpaper. */}
+        <Artwork brand={brand} className="relative hidden lg:block" />
       </div>
     </div>
   );

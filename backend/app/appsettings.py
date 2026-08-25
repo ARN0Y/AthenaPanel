@@ -7,6 +7,7 @@ toggles, so a superadmin can change them from the panel without redeploying.
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from . import branding
 from .config import settings
 from .models import AppSetting
 
@@ -29,6 +30,10 @@ DEFAULTS: dict[str, str] = {
     "tg_bot_token": settings.tg_bot_token,
     "tg_chat_id": settings.tg_chat_id,
     "tg_backup_enabled": "1" if settings.tg_backup_enabled else "0",
+    # Login-page appearance. Kept in the same table so it survives a redeploy
+    # and lands in the nightly dump like every other operator choice; see
+    # branding.py for why it is served without authentication.
+    **branding.DEFAULTS,
 }
 
 _BOOL_KEYS = {"l2tp_enabled", "sstp_enabled", "wg_enabled", "tg_backup_enabled"}

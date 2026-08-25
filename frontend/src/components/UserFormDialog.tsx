@@ -107,6 +107,7 @@ export function UserFormDialog({
   const [outbound, setOutbound] = React.useState("direct");
   const [l2tpMode, setL2tpMode] = React.useState("ipsec");
   const [nodeId, setNodeId] = React.useState(1);
+  const [ownerId, setOwnerId] = React.useState<number | null>(null);
 
   // No raw entry host configured -> raw mode has no reachable endpoint, so the
   // option stays hidden (the contract stated in config.l2tp_raw_address). Still
@@ -127,6 +128,15 @@ export function UserFormDialog({
   const { data: outbounds = [] } = useQuery({
     queryKey: ["outbounds"],
     queryFn: api.outbounds,
+    enabled: isSuperadmin,
+    retry: false,
+  });
+  // Who this account belongs to. Superadmin-only in both directions: the
+  // endpoint refuses a reseller, and the selector is hidden from one, so a
+  // reseller can neither give an account away nor take one.
+  const { data: admins = [] } = useQuery({
+    queryKey: ["admins"],
+    queryFn: api.listAdmins,
     enabled: isSuperadmin,
     retry: false,
   });
@@ -153,6 +163,7 @@ export function UserFormDialog({
       setOutbound(user.outbound || "direct");
       setL2tpMode(user.l2tp_mode || "ipsec");
       setNodeId(user.node_id || 1);
+      setOwnerId(user.created_by_admin_id ?? null);
     } else {
       setUsername("");
       setPassword(randomPassword());
@@ -164,6 +175,7 @@ export function UserFormDialog({
       setIsActive(true);
       setOutbound("direct");
       setL2tpMode("ipsec");
+      setOwnerId(null);
     }
   }, [open, user]);
 
@@ -180,6 +192,11 @@ export function UserFormDialog({
       l2tp_mode: l2tpMode,
       node_id: nodeId,
     };
+    // Only sent when a superadmin actually picked someone: an absent field
+    // leaves ownership alone, which is what an edit that did not touch it means.
+    if (isSuperadmin && ownerId !== null && ownerId !== (user?.created_by_admin_id ?? null)) {
+      payload.owner_admin_id = ownerId;
+    }
     if (!isEdit) {
       payload.username = username;
       payload.password = password;
@@ -283,6 +300,36 @@ export function UserFormDialog({
                           <SelectItem key={n.id} value={String(n.id)}>
                             {n.name}
                             {!n.online && " — offline"}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+              )}
+              {isSuperadmin && admins.length > 0 && (
+                <Field
+                  label="Owner"
+                  hint="which operator manages this account"
+                  htmlFor="u-owner"
+                >
+                  <Select
+                    value={ownerId === null ? "" : String(ownerId)}
+                    onValueChange={(v) => setOwnerId(Number(v))}
+                  >
+                    <SelectTrigger id="u-owner">
+                      <SelectValue placeholder="Me" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {admins
+                        .filter((a) => a.is_active)
+                        .map((a) => (
+                          <SelectItem key={a.id} value={String(a.id)}>
+                            {a.username}
+                            {a.role === "superadmin"
+                              ? " — superadmin"
+                              : a.max_users > 0
+                                ? ` — ${a.user_count}/${a.max_users}`
+                                : ""}
                           </SelectItem>
                         ))}
                     </SelectContent>

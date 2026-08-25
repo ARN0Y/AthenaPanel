@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import audit
@@ -80,6 +80,21 @@ async def update_admin(
     if not admin:
         raise HTTPException(status_code=404, detail="Admin not found")
     data = payload.model_dump(exclude_unset=True)
+
+    # Deleting the last superadmin was already refused; disabling one was not,
+    # and it has the same end state — an panel whose admin, settings and node
+    # surfaces nobody can reach again, with no way back in through the UI.
+    if data.get("is_active") is False:
+        if admin.id == me.id:
+            raise HTTPException(status_code=400, detail="You cannot disable your own account")
+        if admin.is_superadmin:
+            others = (await db.execute(
+                select(func.count(Admin.id)).where(
+                    Admin.role == "superadmin", Admin.is_active.is_(True), Admin.id != admin.id
+                )
+            )).scalar_one()
+            if others == 0:
+                raise HTTPException(status_code=400, detail="Cannot disable the last active superadmin")
     if data.get("password"):
         admin.password_hash = hash_password(data.pop("password"))
     else:
@@ -95,6 +110,7 @@ async def update_admin(
 @router.delete("/{admin_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_admin(
     admin_id: int,
+    reassign_to: int | None = None,
     me: Admin = Depends(require_superadmin),
     db: AsyncSession = Depends(get_session),
 ):
@@ -107,10 +123,32 @@ async def delete_admin(
         supers = (await db.execute(select(func.count(Admin.id)).where(Admin.role == "superadmin"))).scalar_one()
         if supers <= 1:
             raise HTTPException(status_code=400, detail="Cannot delete the last superadmin")
-    # Their VPN users are KEPT (never disconnect users) -> orphaned to superadmin view.
+    # Their VPN accounts are KEPT — deleting an operator must never disconnect
+    # a paying customer. They are handed to a real owner rather than left
+    # pointing at an id that no longer exists: an orphaned account is invisible
+    # to every reseller, counts toward nobody's cap, and silently rejoins the
+    # ownership model if the id is ever reused.
+    new_owner = me
+    if reassign_to is not None and reassign_to != me.id:
+        candidate = await db.get(Admin, reassign_to)
+        if not candidate or not candidate.is_active:
+            raise HTTPException(status_code=400, detail="Reassignment target is unknown or disabled")
+        if candidate.id == admin.id:
+            raise HTTPException(status_code=400, detail="Cannot reassign to the admin being deleted")
+        new_owner = candidate
+
+    moved = (await db.execute(
+        update(User)
+        .where(User.created_by_admin_id == admin.id)
+        .values(created_by_admin_id=new_owner.id)
+    )).rowcount or 0
+
     username = admin.username
     await db.delete(admin)
-    await audit.record(db, "delete_admin", username, "users preserved", actor=me.username)
+    await audit.record(
+        db, "delete_admin", username,
+        f"{moved} account(s) reassigned to {new_owner.username}", actor=me.username,
+    )
     await db.commit()
     return None
 

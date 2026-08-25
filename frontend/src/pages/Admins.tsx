@@ -121,7 +121,11 @@ export function Admins() {
   });
   const deleteMut = useMutation({
     mutationFn: (id: number) => api.deleteAdmin(id),
-    onSuccess: () => { toast.success("Admin deleted (their users were kept)"); qc.invalidateQueries({ queryKey: ["admins"] }); },
+    onSuccess: () => {
+      toast.success("Admin deleted — their accounts were handed to you");
+      qc.invalidateQueries({ queryKey: ["admins"] });
+      qc.invalidateQueries({ queryKey: ["users"] });
+    },
     onError: (e) => toast.error(e instanceof ApiError ? e.message : "Failed"),
   });
   const createInvite = useMutation({
@@ -171,7 +175,10 @@ export function Admins() {
                           <Switch checked={a.is_active} onCheckedChange={(v) => toggleMut.mutate({ id: a.id, is_active: v })} />
                           <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setConfirm({
                             title: `Delete admin ${a.username}?`,
-                            description: "Their VPN users are kept and become visible to superadmins. This cannot be undone.",
+                            description:
+                              `Their ${a.user_count} VPN account(s) are kept and handed to you — ` +
+                              "nobody is disconnected. You can reassign them afterwards from Users. " +
+                              "This cannot be undone.",
                             action: () => deleteMut.mutate(a.id),
                           })}>
                             <Trash2 className="h-4 w-4 text-destructive" />

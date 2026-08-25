@@ -18,6 +18,7 @@ from .routers import (
     apikeys as apikeys_router,
     auth,
     backups as backups_router,
+    branding as branding_router,
     events,
     internal,
     nodes as nodes_router,
@@ -204,6 +205,9 @@ app.add_middleware(
 for r in (
     auth.router,
     admins.router,
+    # Public: the sign-in screen renders before anyone has a token.
+    branding_router.public,
+    branding_router.router,
     users.router,
     sessions.router,
     stats.router,
