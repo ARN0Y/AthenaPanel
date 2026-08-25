@@ -175,8 +175,8 @@ class BrandingOut(BaseModel):
     login_focal: str = "center"
     login_overlay: int = 45
     login_image_url: str = ""
+    login_image_id: str = ""
     has_image: bool = False
-    login_image_version: str = "0"
 
 
 class BrandingUpdate(BaseModel):
@@ -186,6 +186,18 @@ class BrandingUpdate(BaseModel):
     login_focal: str | None = None
     login_overlay: int | None = None
     login_image_url: str | None = Field(default=None, max_length=512)
+    # Which stored image to show; "" clears it.
+    login_image_id: str | None = Field(default=None, max_length=64)
+
+
+class BrandingImage(BaseModel):
+    """One entry in the artwork library."""
+
+    id: str
+    content_type: str
+    bytes: int
+    uploaded_at: float
+    active: bool = False
 
 
 class BulkAction(BaseModel):

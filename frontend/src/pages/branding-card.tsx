@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Image as ImageIcon, Loader2, Trash2, Upload } from "lucide-react";
+import { Check, Image as ImageIcon, Loader2, Trash2, Upload } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -14,15 +14,26 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ApiError, api, brandingImageUrl, type Branding, type BrandingPayload } from "@/lib/api";
+import {
+  ApiError,
+  api,
+  brandingThumbUrl,
+  type Branding,
+  type BrandingPayload,
+} from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 /**
  * Sign-in screen appearance.
  *
- * Everything here is written to `app_settings`, so it survives a redeploy and
- * lands in the nightly dump. The artwork is a file rather than a column — see
- * backend/app/branding.py for why.
+ * Every control edits a local DRAFT and the preview renders from that draft, so
+ * dragging the dim slider is one continuous adjustment rather than forty saves
+ * and forty toasts. Nothing reaches the server until Save. Uploading is the one
+ * exception — a file has to be sent to exist at all — and it is explicit enough
+ * that a single confirmation is right.
+ *
+ * Values are stored in `app_settings`; artwork is a file library. See
+ * backend/app/branding.py.
  */
 
 const LAYOUTS: { id: Branding["login_layout"]; label: string; hint: string }[] = [
@@ -34,12 +45,23 @@ const LAYOUTS: { id: Branding["login_layout"]; label: string; hint: string }[] =
 
 const FOCALS: Branding["login_focal"][] = ["center", "top", "bottom", "left", "right"];
 
+function kb(n: number) {
+  return n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.round(n / 1024)} KB`;
+}
+
 /** A small drawing of each arrangement — quicker to read than the words. */
 function LayoutThumb({ id, active }: { id: Branding["login_layout"]; active: boolean }) {
-  const art = <div className={cn("rounded-[2px]", active ? "bg-primary/45" : "bg-muted-foreground/25")} />;
+  const art = (
+    <div className={cn("rounded-[2px]", active ? "bg-primary/45" : "bg-muted-foreground/25")} />
+  );
   const form = (
     <div className="flex flex-col justify-center gap-[3px] px-1.5">
-      <div className={cn("h-[3px] w-2/3 rounded-full", active ? "bg-primary/70" : "bg-muted-foreground/45")} />
+      <div
+        className={cn(
+          "h-[3px] w-2/3 rounded-full",
+          active ? "bg-primary/70" : "bg-muted-foreground/45",
+        )}
+      />
       <div className="h-[2px] w-full rounded-full bg-muted-foreground/25" />
       <div className="h-[2px] w-full rounded-full bg-muted-foreground/25" />
     </div>
@@ -71,32 +93,62 @@ function LayoutThumb({ id, active }: { id: Branding["login_layout"]; active: boo
   );
 }
 
+type Draft = Pick<
+  Branding,
+  | "brand_name"
+  | "login_tagline"
+  | "login_layout"
+  | "login_focal"
+  | "login_overlay"
+  | "login_image_url"
+  | "login_image_id"
+>;
+
+const toDraft = (b: Branding): Draft => ({
+  brand_name: b.brand_name,
+  login_tagline: b.login_tagline,
+  login_layout: b.login_layout,
+  login_focal: b.login_focal,
+  login_overlay: b.login_overlay,
+  login_image_url: b.login_image_url,
+  login_image_id: b.login_image_id,
+});
+
+const same = (a: Draft, b: Draft) => (Object.keys(a) as (keyof Draft)[]).every((k) => a[k] === b[k]);
+
 export function BrandingCard() {
   const qc = useQueryClient();
   const fileRef = React.useRef<HTMLInputElement>(null);
 
   const { data, isLoading } = useQuery({ queryKey: ["branding"], queryFn: api.branding });
+  const { data: images = [] } = useQuery({
+    queryKey: ["branding-images"],
+    queryFn: api.brandingImages,
+  });
 
-  // Text inputs are local until saved; the pickers apply immediately, because
-  // for those the preview beside them IS the feedback.
-  const [brandName, setBrandName] = React.useState("");
-  const [tagline, setTagline] = React.useState("");
-  const [imageUrl, setImageUrl] = React.useState("");
-  const [touched, setTouched] = React.useState(false);
+  const [draft, setDraft] = React.useState<Draft | null>(null);
 
+  // Adopt server state only while there is nothing unsaved to lose — otherwise
+  // a background refetch would wipe edits mid-sentence.
   React.useEffect(() => {
     if (!data) return;
-    setBrandName(data.brand_name);
-    setTagline(data.login_tagline);
-    setImageUrl(data.login_image_url);
-    setTouched(false);
+    setDraft((prev) => (prev === null || same(prev, toDraft(data)) ? toDraft(data) : prev));
   }, [data]);
+
+  const dirty = Boolean(data && draft && !same(draft, toDraft(data)));
+  const set = <K extends keyof Draft>(k: K, v: Draft[K]) =>
+    setDraft((d) => (d ? { ...d, [k]: v } : d));
+
+  const adopt = (fresh: Branding) => {
+    qc.setQueryData(["branding"], fresh);
+    qc.invalidateQueries({ queryKey: ["branding-images"] });
+    setDraft(toDraft(fresh));
+  };
 
   const save = useMutation({
     mutationFn: (p: BrandingPayload) => api.updateBranding(p),
     onSuccess: (fresh) => {
-      qc.setQueryData(["branding"], fresh);
-      setTouched(false);
+      adopt(fresh);
       toast.success("Sign-in screen updated");
     },
     onError: (e) => toast.error(e instanceof ApiError ? e.message : "Could not save"),
@@ -105,22 +157,22 @@ export function BrandingCard() {
   const upload = useMutation({
     mutationFn: (f: File) => api.uploadBrandingImage(f),
     onSuccess: (fresh) => {
-      qc.setQueryData(["branding"], fresh);
-      toast.success("Image uploaded");
+      adopt(fresh);
+      toast.success("Image added");
     },
     onError: (e) => toast.error(e instanceof ApiError ? e.message : "Upload failed"),
   });
 
   const removeImage = useMutation({
-    mutationFn: () => api.deleteBrandingImage(),
+    mutationFn: (id: string) => api.deleteBrandingImage(id),
     onSuccess: (fresh) => {
-      qc.setQueryData(["branding"], fresh);
+      adopt(fresh);
       toast.success("Image removed");
     },
     onError: (e) => toast.error(e instanceof ApiError ? e.message : "Could not remove"),
   });
 
-  if (isLoading || !data) {
+  if (isLoading || !data || !draft) {
     return (
       <Card>
         <CardHeader>
@@ -133,9 +185,11 @@ export function BrandingCard() {
     );
   }
 
-  const src = brandingImageUrl(data);
-  const split = data.login_layout === "split-right" || data.login_layout === "split-left";
-  const imageRight = data.login_layout !== "split-left";
+  // The preview follows the draft, including which library image is picked, so
+  // what is on screen is exactly what Save would publish.
+  const previewSrc = draft.login_image_url || (draft.login_image_id ? brandingThumbUrl(draft.login_image_id) : "");
+  const split = draft.login_layout === "split-right" || draft.login_layout === "split-left";
+  const imageRight = draft.login_layout !== "split-left";
 
   return (
     <Card>
@@ -157,11 +211,13 @@ export function BrandingCard() {
                 <div className={cn("grid h-full grid-cols-2", !imageRight && "[&>*:first-child]:order-2")}>
                   <div className="relative flex flex-col p-4">
                     <div className="text-[9px] font-semibold uppercase tracking-[0.28em] text-foreground/80">
-                      {brandName || "ATHENA"}
+                      {draft.brand_name || "ATHENA"}
                     </div>
                     <div className="flex flex-1 flex-col justify-center space-y-1.5">
                       <div className="text-[13px] font-semibold">Sign in</div>
-                      <div className="truncate text-[9px] text-muted-foreground">{tagline}</div>
+                      <div className="truncate text-[9px] text-muted-foreground">
+                        {draft.login_tagline}
+                      </div>
                       <div className="mt-2 h-[6px] w-4/5 rounded-[2px] border border-border/70" />
                       <div className="h-[6px] w-4/5 rounded-[2px] border border-border/70" />
                       <div className="mt-1.5 h-[9px] w-2/5 rounded-[3px] bg-foreground/80" />
@@ -173,16 +229,16 @@ export function BrandingCard() {
                       )}
                     />
                   </div>
-                  <PreviewArt src={src} brand={data} />
+                  <PreviewArt src={previewSrc} draft={draft} />
                 </div>
               ) : (
                 <div className="relative h-full">
-                  <PreviewArt src={src} brand={data} />
+                  <PreviewArt src={previewSrc} draft={draft} />
                   <div className="absolute inset-0 flex items-center justify-center">
                     <div className="w-1/2 rounded-md border border-border/70 bg-background/85 p-3 backdrop-blur-sm">
                       <div className="text-[11px] font-semibold">Sign in</div>
-                      <div className="mt-1.5 h-[3px] w-full rounded-full bg-muted-foreground/30" />
-                      <div className="mt-1 h-[3px] w-full rounded-full bg-muted-foreground/30" />
+                      <div className="mt-1.5 h-[6px] w-full rounded-[2px] border border-border/70" />
+                      <div className="mt-1 h-[6px] w-full rounded-[2px] border border-border/70" />
                       <div className="mt-2 h-[8px] w-1/2 rounded-[3px] bg-foreground/80" />
                     </div>
                   </div>
@@ -197,12 +253,12 @@ export function BrandingCard() {
           <Label className="text-xs text-muted-foreground">Layout</Label>
           <div className="grid gap-2 sm:grid-cols-4">
             {LAYOUTS.map((l) => {
-              const active = data.login_layout === l.id;
+              const active = draft.login_layout === l.id;
               return (
                 <button
                   key={l.id}
                   type="button"
-                  onClick={() => save.mutate({ login_layout: l.id })}
+                  onClick={() => set("login_layout", l.id)}
                   className={cn(
                     "rounded-lg border-2 p-2 text-left transition-colors",
                     active ? "border-primary bg-primary/5" : "border-border hover:bg-muted/50",
@@ -217,79 +273,125 @@ export function BrandingCard() {
           </div>
         </div>
 
-        {/* ---- artwork ---- */}
+        {/* ---- artwork library ---- */}
         <div className="space-y-3">
-          <Label className="text-xs text-muted-foreground">Artwork</Label>
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              ref={fileRef}
-              type="file"
-              accept="image/png,image/jpeg,image/webp,image/avif,image/gif"
-              className="hidden"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) upload.mutate(f);
-                e.target.value = ""; // so re-picking the same file fires again
-              }}
-            />
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => fileRef.current?.click()}
-              disabled={upload.isPending}
-            >
-              {upload.isPending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Upload className="h-4 w-4" />
-              )}
-              Upload image
-            </Button>
-            {data.has_image && !data.login_image_url && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => removeImage.mutate()}
-                disabled={removeImage.isPending}
-              >
-                <Trash2 className="h-4 w-4" />
-                Remove
-              </Button>
-            )}
-            <span className="text-[11px] text-muted-foreground">
-              PNG, JPEG, WebP, AVIF or GIF · up to 12 MB
-            </span>
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="b-url" className="text-[11px] text-muted-foreground">
-              …or link one instead
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Label className="text-xs text-muted-foreground">
+              Artwork {images.length > 0 && `· ${images.length} of 12`}
             </Label>
-            <div className="flex gap-2">
-              <Input
-                id="b-url"
-                placeholder="https://example.com/wallpaper.jpg"
-                value={imageUrl}
+            <div className="flex items-center gap-2">
+              <input
+                ref={fileRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/avif,image/gif"
+                className="hidden"
                 onChange={(e) => {
-                  setImageUrl(e.target.value);
-                  setTouched(true);
+                  const f = e.target.files?.[0];
+                  if (f) upload.mutate(f);
+                  e.target.value = ""; // so re-picking the same file fires again
                 }}
               />
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => save.mutate({ login_image_url: imageUrl })}
-                disabled={save.isPending}
+                size="sm"
+                onClick={() => fileRef.current?.click()}
+                disabled={upload.isPending || images.length >= 12}
               >
-                Apply
+                {upload.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Upload className="h-4 w-4" />
+                )}
+                Upload
               </Button>
             </div>
-            {data.login_image_url && (
+          </div>
+
+          {images.length === 0 ? (
+            <div className="flex h-24 flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-border text-center">
+              <ImageIcon className="h-5 w-5 text-muted-foreground/40" />
+              <span className="text-[11px] text-muted-foreground">
+                No artwork yet — the sign-in screen uses its built-in backdrop
+              </span>
+            </div>
+          ) : (
+            <div className="grid grid-cols-3 gap-2 sm:grid-cols-5 lg:grid-cols-6">
+              {/* "None" is a first-class choice: it is how an operator goes back
+                  to the built-in backdrop without deleting their uploads. */}
+              <button
+                type="button"
+                onClick={() => set("login_image_id", "")}
+                className={cn(
+                  "group relative flex aspect-[4/3] items-center justify-center overflow-hidden rounded-lg border-2 transition-colors",
+                  draft.login_image_id === ""
+                    ? "border-primary"
+                    : "border-border hover:border-muted-foreground/50",
+                )}
+                title="No artwork"
+              >
+                <ImageIcon className="h-4 w-4 text-muted-foreground/50" />
+                {draft.login_image_id === "" && (
+                  <span className="absolute right-1 top-1 rounded-full bg-primary p-0.5">
+                    <Check className="h-2.5 w-2.5 text-primary-foreground" />
+                  </span>
+                )}
+              </button>
+
+              {images.map((img) => {
+                const picked = draft.login_image_id === img.id;
+                return (
+                  <div key={img.id} className="group relative">
+                    <button
+                      type="button"
+                      onClick={() => set("login_image_id", img.id)}
+                      className={cn(
+                        "block aspect-[4/3] w-full overflow-hidden rounded-lg border-2 transition-colors",
+                        picked ? "border-primary" : "border-border hover:border-muted-foreground/50",
+                      )}
+                      title={`${img.content_type.replace("image/", "").toUpperCase()} · ${kb(img.bytes)}`}
+                    >
+                      <img
+                        src={brandingThumbUrl(img.id)}
+                        alt=""
+                        loading="lazy"
+                        className="h-full w-full object-cover"
+                      />
+                    </button>
+                    {picked && (
+                      <span className="pointer-events-none absolute right-1 top-1 rounded-full bg-primary p-0.5">
+                        <Check className="h-2.5 w-2.5 text-primary-foreground" />
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => removeImage.mutate(img.id)}
+                      disabled={removeImage.isPending}
+                      title="Delete from library"
+                      className="absolute left-1 top-1 rounded-md bg-background/85 p-1 opacity-0 transition-opacity hover:bg-destructive hover:text-destructive-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="space-y-1.5">
+            <Label htmlFor="b-url" className="text-[11px] text-muted-foreground">
+              …or link one instead
+            </Label>
+            <Input
+              id="b-url"
+              placeholder="https://example.com/wallpaper.jpg"
+              value={draft.login_image_url}
+              onChange={(e) => set("login_image_url", e.target.value)}
+            />
+            {draft.login_image_url && (
               <p className="text-[11px] text-muted-foreground">
-                A link is set, so it is used instead of any uploaded file. Clear it to go back
-                to the upload.
+                A link is set, so it is used instead of anything in the library. Clear it to go
+                back to your uploads.
               </p>
             )}
           </div>
@@ -301,10 +403,7 @@ export function BrandingCard() {
             <Label htmlFor="b-focal" className="text-xs text-muted-foreground">
               Focal point
             </Label>
-            <Select
-              value={data.login_focal}
-              onValueChange={(v) => save.mutate({ login_focal: v })}
-            >
+            <Select value={draft.login_focal} onValueChange={(v) => set("login_focal", v as Draft["login_focal"])}>
               <SelectTrigger id="b-focal">
                 <SelectValue />
               </SelectTrigger>
@@ -327,7 +426,7 @@ export function BrandingCard() {
                 Dim
               </Label>
               <span className="text-[11px] tabular-nums text-muted-foreground">
-                {data.login_overlay}%
+                {draft.login_overlay}%
               </span>
             </div>
             <input
@@ -336,8 +435,8 @@ export function BrandingCard() {
               min={0}
               max={90}
               step={5}
-              value={data.login_overlay}
-              onChange={(e) => save.mutate({ login_overlay: Number(e.target.value) })}
+              value={draft.login_overlay}
+              onChange={(e) => set("login_overlay", Number(e.target.value))}
               className="h-9 w-full cursor-pointer accent-primary"
             />
             <p className="text-[11px] text-muted-foreground">
@@ -355,11 +454,8 @@ export function BrandingCard() {
             <Input
               id="b-name"
               maxLength={48}
-              value={brandName}
-              onChange={(e) => {
-                setBrandName(e.target.value);
-                setTouched(true);
-              }}
+              value={draft.brand_name}
+              onChange={(e) => set("brand_name", e.target.value)}
             />
           </div>
           <div className="space-y-1.5">
@@ -369,38 +465,35 @@ export function BrandingCard() {
             <Input
               id="b-tag"
               maxLength={160}
-              value={tagline}
-              onChange={(e) => {
-                setTagline(e.target.value);
-                setTouched(true);
-              }}
+              value={draft.login_tagline}
+              onChange={(e) => set("login_tagline", e.target.value)}
             />
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 border-t border-border/60 pt-4">
+          <Button type="button" onClick={() => save.mutate(draft)} disabled={save.isPending || !dirty}>
+            {save.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+            Save changes
+          </Button>
           <Button
             type="button"
-            onClick={() =>
-              save.mutate({
-                brand_name: brandName,
-                login_tagline: tagline,
-                login_image_url: imageUrl,
-              })
-            }
-            disabled={save.isPending || !touched}
+            variant="ghost"
+            onClick={() => setDraft(toDraft(data))}
+            disabled={save.isPending || !dirty}
           >
-            {save.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-            Save text
+            Discard
           </Button>
-          {touched && <span className="text-[11px] text-muted-foreground">Unsaved changes</span>}
+          <span className="text-[11px] text-muted-foreground">
+            {dirty ? "Unsaved changes — the preview shows the draft" : "Everything is saved"}
+          </span>
         </div>
       </CardContent>
     </Card>
   );
 }
 
-function PreviewArt({ src, brand }: { src: string; brand: Branding }) {
+function PreviewArt({ src, draft }: { src: string; draft: Draft }) {
   return (
     <div className="relative overflow-hidden bg-muted">
       {src ? (
@@ -408,14 +501,14 @@ function PreviewArt({ src, brand }: { src: string; brand: Branding }) {
           src={src}
           alt=""
           className="h-full w-full object-cover"
-          style={{ objectPosition: brand.login_focal }}
+          style={{ objectPosition: draft.login_focal }}
         />
       ) : (
         <div className="flex h-full w-full items-center justify-center bg-[radial-gradient(120%_100%_at_70%_20%,hsl(var(--primary)/0.30),transparent_60%)]">
           <ImageIcon className="h-5 w-5 text-muted-foreground/40" />
         </div>
       )}
-      <div className="absolute inset-0 bg-background" style={{ opacity: brand.login_overlay / 100 }} />
+      <div className="absolute inset-0 bg-background" style={{ opacity: draft.login_overlay / 100 }} />
     </div>
   );
 }

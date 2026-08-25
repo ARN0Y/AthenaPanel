@@ -10,11 +10,10 @@ import {
   Eye,
   EyeOff,
   KeyRound,
-  Moon,
   Network,
   Send,
+  Palette,
   Server,
-  Sun,
   Trash2,
   Waypoints,
 } from "lucide-react";
@@ -31,7 +30,6 @@ import { BrandingCard } from "./branding-card";
 import { Separator } from "@/components/ui/separator";
 import { PageHeader } from "@/components/widgets/PageHeader";
 import { useAuth } from "@/hooks/useAuth";
-import { useTheme } from "@/hooks/useTheme";
 import { api, ApiError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { formatBytes, formatUptime, relativeTime } from "@/lib/format";
@@ -70,7 +68,6 @@ function CopyField({ label, value, secret }: { label: string; value: string; sec
 }
 
 export function Settings() {
-  const { theme, setTheme } = useTheme();
   const { isSuperadmin } = useAuth();
   const qc = useQueryClient();
   const { data } = useQuery({ queryKey: ["settings"], queryFn: api.settings });
@@ -160,7 +157,7 @@ export function Settings() {
           <TabsTrigger value="server"><Network className="h-4 w-4" /> Server</TabsTrigger>
           <TabsTrigger value="outbounds"><Waypoints className="h-4 w-4" /> Outbounds</TabsTrigger>
           <TabsTrigger value="security"><KeyRound className="h-4 w-4" /> Security</TabsTrigger>
-          <TabsTrigger value="appearance"><Sun className="h-4 w-4" /> Appearance</TabsTrigger>
+          <TabsTrigger value="appearance"><Palette className="h-4 w-4" /> Appearance</TabsTrigger>
           <TabsTrigger value="about"><Server className="h-4 w-4" /> About</TabsTrigger>
           {isSuperadmin && <TabsTrigger value="backups"><Database className="h-4 w-4" /> Backups</TabsTrigger>}
         </TabsList>
@@ -315,40 +312,22 @@ export function Settings() {
         </TabsContent>
 
         <TabsContent value="appearance" className="space-y-6">
-          <Card className="max-w-lg">
-            <CardHeader>
-              <CardTitle className="text-base">Theme</CardTitle>
-              <CardDescription>Choose how the panel looks</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-2 gap-3">
-                {(["dark", "light"] as const).map((t) => (
-                  <button
-                    key={t}
-                    onClick={() => setTheme(t)}
-                    className={cn(
-                      "flex items-center gap-3 rounded-lg border-2 p-4 transition-colors",
-                      theme === t ? "border-primary bg-primary/5" : "border-border hover:bg-muted/50",
-                    )}
-                  >
-                    <div className={cn("flex h-10 w-10 items-center justify-center rounded-lg", t === "dark" ? "bg-slate-900 text-slate-100" : "bg-slate-100 text-slate-900")}>
-                      {t === "dark" ? <Moon className="h-5 w-5" /> : <Sun className="h-5 w-5" />}
-                    </div>
-                    <div className="text-left">
-                      <div className="font-medium capitalize">{t}</div>
-                      <div className="text-xs text-muted-foreground">{t === "dark" ? "Easy on the eyes" : "Bright & clean"}</div>
-                    </div>
-                    {theme === t && <Check className="ml-auto h-5 w-5 text-primary" />}
-                  </button>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* The sign-in screen is the operator's, not each admin's: it is one
-              stored setting rather than a per-browser preference like the theme
-              above, so only a superadmin may change it. */}
+          {/* The dark/light picker lived here and read as a second, unrelated
+              card stacked above the sign-in settings. It is a per-browser
+              preference, not an operator setting, and the header already has a
+              toggle for it — so this tab is now only the thing it is named for. */}
           {isSuperadmin && <BrandingCard />}
+          {!isSuperadmin && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Appearance</CardTitle>
+                <CardDescription>
+                  Use the toggle in the header to switch between dark and light. The sign-in
+                  screen is set by the panel owner.
+                </CardDescription>
+              </CardHeader>
+            </Card>
+          )}
         </TabsContent>
 
         <TabsContent value="about">

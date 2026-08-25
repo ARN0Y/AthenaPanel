@@ -1,4 +1,4 @@
-"""Login-page appearance: cosmetic settings plus the operator's own image.
+"""Login-page appearance: cosmetic settings plus the operator's own artwork.
 
 Two things make this different from the rest of `appsettings`:
 
@@ -6,9 +6,15 @@ Two things make this different from the rest of `appsettings`:
   render, so `GET /api/branding` is public. Everything here is therefore
   deliberately cosmetic — no address, no protocol state, no operator name. Add
   a key here only if you would be happy printing it on a billboard.
-* **The image is a file, not a value.** Wallpapers run to several megabytes, so
-  storing one as a base64 column would bloat every settings read and every
-  nightly dump. It lives on disk and is streamed by its own endpoint.
+* **Images are files, not values.** Wallpapers run to several megabytes, so
+  storing them as base64 columns would bloat every settings read and every
+  nightly dump. They live on disk and are streamed by their own endpoint.
+
+Uploads are kept as a **library**, not a single slot. An operator trying two
+wallpapers should be able to go back to the first one by clicking it, not by
+finding the file again and re-uploading it. Files are content-addressed —
+the id is the first 16 hex of the sha256 — so the same image uploaded twice is
+one file, and the id doubles as a perfect cache key.
 """
 
 from __future__ import annotations
@@ -25,16 +31,16 @@ DEFAULTS: dict[str, str] = {
     # Where the artwork sits relative to the form.
     "login_layout": "split-right",
     # How far the artwork is dimmed, 0-90 percent. A bright wallpaper behind
-    # white text is unreadable, and the operator picks the picture, not us.
+    # pale text is unreadable, and the operator picks the picture, not us.
     "login_overlay": "45",
     # object-position for the artwork, so a portrait subject can be kept in
     # frame when the panel is cropped.
     "login_focal": "center",
-    # An external URL wins over the uploaded file when set, so an operator who
+    # An external URL wins over the library when set, so an operator who
     # already hosts their artwork does not have to upload it again.
     "login_image_url": "",
-    # Bumped on every upload so browsers refetch a replaced image.
-    "login_image_version": "0",
+    # Which stored image is showing. Empty = none.
+    "login_image_id": "",
 }
 
 LAYOUTS = ("split-right", "split-left", "centered", "backdrop")
@@ -49,8 +55,11 @@ CONTENT_TYPES: dict[str, str] = {
     "image/avif": ".avif",
     "image/gif": ".gif",
 }
+EXT_TO_TYPE = {ext: ctype for ctype, ext in CONTENT_TYPES.items()}
 
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
+# A ceiling so a forgotten panel cannot fill the disk one wallpaper at a time.
+MAX_LIBRARY = 12
 
 # Magic numbers, checked against the declared content type. A browser's
 # Content-Type header is attacker-controlled; the first bytes of the file are
@@ -63,7 +72,7 @@ _MAGIC: dict[str, tuple[bytes, ...]] = {
     ".gif": (b"GIF87a", b"GIF89a"),
 }
 
-_STEM = "login-image"
+_ID_LEN = 16
 
 
 def directory() -> Path:
@@ -71,23 +80,51 @@ def directory() -> Path:
     return Path(os.environ.get("BRANDING_DIR", "/var/lib/vpn-panel/branding"))
 
 
-def find_image() -> Path | None:
-    """The stored image, whatever extension it was uploaded with."""
-    d = directory()
-    if not d.is_dir():
+def _valid_id(image_id: str) -> bool:
+    """Ids are our own hex digests. Anything else is someone probing for
+    ../../etc/passwd, so it never reaches the filesystem."""
+    return (
+        isinstance(image_id, str)
+        and len(image_id) == _ID_LEN
+        and all(c in "0123456789abcdef" for c in image_id)
+    )
+
+
+def path_for(image_id: str) -> Path | None:
+    if not _valid_id(image_id):
         return None
+    d = directory()
     for ext in CONTENT_TYPES.values():
-        p = d / f"{_STEM}{ext}"
-        if p.is_file() and p.stat().st_size > 0:
+        p = d / f"{image_id}{ext}"
+        if p.is_file():
             return p
     return None
 
 
+def library() -> list[dict]:
+    """Every stored image, newest first."""
+    d = directory()
+    if not d.is_dir():
+        return []
+    out = []
+    for p in d.iterdir():
+        if not p.is_file() or p.suffix not in EXT_TO_TYPE:
+            continue
+        if not _valid_id(p.stem):
+            continue
+        st = p.stat()
+        out.append({
+            "id": p.stem,
+            "content_type": EXT_TO_TYPE[p.suffix],
+            "bytes": st.st_size,
+            "uploaded_at": st.st_mtime,
+        })
+    out.sort(key=lambda r: r["uploaded_at"], reverse=True)
+    return out
+
+
 def content_type_for(path: Path) -> str:
-    for ctype, ext in CONTENT_TYPES.items():
-        if path.suffix == ext:
-            return ctype
-    return "application/octet-stream"
+    return EXT_TO_TYPE.get(path.suffix, "application/octet-stream")
 
 
 def validate(content_type: str, blob: bytes) -> str:
@@ -110,34 +147,38 @@ def validate(content_type: str, blob: bytes) -> str:
 
 
 def save(blob: bytes, ext: str) -> str:
-    """Write the artwork, replacing any previous one. Returns a version stamp.
+    """Store an image and return its id.
 
-    Only one image is ever kept: every other extension is removed first, so a
-    png uploaded over a jpg cannot leave the old file behind to be served by
-    `find_image()`'s extension scan.
+    Content-addressed, so re-uploading a picture the library already holds is a
+    no-op that returns the existing id rather than a second copy of the file.
     """
+    image_id = hashlib.sha256(blob).hexdigest()[:_ID_LEN]
     d = directory()
     d.mkdir(parents=True, exist_ok=True)
-    for other in CONTENT_TYPES.values():
-        stale = d / f"{_STEM}{other}"
-        if stale.is_file():
-            stale.unlink()
-    target = d / f"{_STEM}{ext}"
-    tmp = d / f".{_STEM}.tmp"
+
+    existing = path_for(image_id)
+    if existing is not None:
+        return image_id
+
+    current = library()
+    if len(current) >= MAX_LIBRARY:
+        raise ValueError(
+            f"The library holds {MAX_LIBRARY} images. Remove one before adding another."
+        )
+
+    target = d / f"{image_id}{ext}"
+    tmp = d / f".{image_id}.tmp"
     tmp.write_bytes(blob)
     tmp.replace(target)  # atomic, so a reader never sees a half-written file
-    return hashlib.sha256(blob).hexdigest()[:12]
+    return image_id
 
 
-def remove() -> bool:
-    """Drop the artwork; the login page falls back to its built-in backdrop."""
-    gone = False
-    for ext in CONTENT_TYPES.values():
-        p = directory() / f"{_STEM}{ext}"
-        if p.is_file():
-            p.unlink()
-            gone = True
-    return gone
+def remove(image_id: str) -> bool:
+    p = path_for(image_id)
+    if p is None:
+        return False
+    p.unlink()
+    return True
 
 
 def public_view(values: dict[str, str]) -> dict:
@@ -149,6 +190,12 @@ def public_view(values: dict[str, str]) -> dict:
     except (TypeError, ValueError):
         overlay = 45
     url = (values.get("login_image_url") or "").strip()
+    image_id = (values.get("login_image_id") or "").strip()
+    # A stored id whose file has gone (deleted by hand, restored from a dump
+    # without the directory) must read as "no image" rather than pointing the
+    # login page at a 404.
+    if image_id and path_for(image_id) is None:
+        image_id = ""
     return {
         "brand_name": values.get("brand_name") or "ATHENA",
         "login_tagline": values.get("login_tagline", ""),
@@ -156,6 +203,6 @@ def public_view(values: dict[str, str]) -> dict:
         "login_focal": focal if focal in FOCALS else "center",
         "login_overlay": overlay,
         "login_image_url": url,
-        "has_image": bool(url) or find_image() is not None,
-        "login_image_version": values.get("login_image_version", "0"),
+        "login_image_id": image_id,
+        "has_image": bool(url) or bool(image_id),
     }

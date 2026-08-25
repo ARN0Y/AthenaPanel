@@ -1,59 +1,90 @@
 """Login-page appearance.
 
-The two GETs here are the only unauthenticated endpoints in the panel besides
-login itself and the subscription link, because the sign-in screen has to draw
-before anyone has a token. Everything they return is cosmetic by construction —
-see branding.py. The writes are superadmin-only and live under /api/settings so
-they sit with every other operator-level change.
+The two GETs under /api/branding are the only unauthenticated endpoints in the
+panel besides login itself and the subscription link, because the sign-in screen
+has to draw before anyone has a token. Everything they return is cosmetic by
+construction — see branding.py. The writes are superadmin-only and live under
+/api/settings so they sit with every other operator-level change.
+
+**None of this writes to the audit log.** The log exists so an operator can see
+who changed something that matters — a quota, an owner, a protocol endpoint.
+Wallpapers and dim sliders are not that, and burying those entries under a
+stream of cosmetic edits makes the log worse at its actual job.
 """
 
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import appsettings, audit, branding
+from .. import appsettings, branding
 from ..database import get_session
 from ..deps import require_superadmin
 from ..models import Admin
-from ..schemas import BrandingOut, BrandingUpdate
+from ..schemas import BrandingImage, BrandingOut, BrandingUpdate
 
 public = APIRouter(tags=["branding"])
 router = APIRouter(prefix="/api/settings/branding", tags=["branding"])
 
 
-@public.get("/api/branding", response_model=BrandingOut)
-async def get_branding(db: AsyncSession = Depends(get_session)):
-    """Public: what the sign-in screen should look like."""
+async def _view(db: AsyncSession) -> BrandingOut:
     return BrandingOut(**branding.public_view(await appsettings.get_all(db)))
 
 
+@public.get("/api/branding", response_model=BrandingOut)
+async def get_branding(db: AsyncSession = Depends(get_session)):
+    """Public: what the sign-in screen should look like."""
+    return await _view(db)
+
+
 @public.get("/api/branding/image")
-async def get_branding_image(db: AsyncSession = Depends(get_session)):
-    """Public: the operator's artwork, or 404 to fall back to the built-in look."""
-    path = branding.find_image()
-    if path is None:
+async def get_branding_image(id: str = "", db: AsyncSession = Depends(get_session)):
+    """Public: an image from the library.
+
+    Without `id`, serves whichever one is active — that is what the login page
+    asks for. With `id`, serves that one, which is how the settings gallery
+    shows thumbnails of images that are not currently in use.
+    """
+    image_id = id
+    if not image_id:
+        values = await appsettings.get_all(db)
+        image_id = (values.get("login_image_id") or "").strip()
+    if not image_id:
         raise HTTPException(status_code=404, detail="No login image set")
-    values = await appsettings.get_all(db)
+
+    path = branding.path_for(image_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail="No such image")
     return Response(
         content=path.read_bytes(),
         media_type=branding.content_type_for(path),
         headers={
-            # Immutable against the version stamp: the URL carries ?v=<stamp>,
-            # so a replaced image is a new URL and a long cache is safe.
+            # The id IS the content hash, so a given id can never mean different
+            # bytes and a long cache is safe.
             "Cache-Control": "public, max-age=31536000, immutable",
-            "ETag": f'"{values.get("login_image_version", "0")}"',
+            "ETag": f'"{image_id}"',
         },
     )
+
+
+@router.get("/images", response_model=list[BrandingImage])
+async def list_images(
+    _: Admin = Depends(require_superadmin),
+    db: AsyncSession = Depends(get_session),
+):
+    """The image library, newest first, with the active one flagged."""
+    values = await appsettings.get_all(db)
+    active = (values.get("login_image_id") or "").strip()
+    return [BrandingImage(**row, active=row["id"] == active) for row in branding.library()]
 
 
 @router.put("", response_model=BrandingOut)
 async def update_branding(
     payload: BrandingUpdate,
-    me: Admin = Depends(require_superadmin),
+    _: Admin = Depends(require_superadmin),
     db: AsyncSession = Depends(get_session),
 ):
     changes = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
     if not changes:
-        return BrandingOut(**branding.public_view(await appsettings.get_all(db)))
+        return await _view(db)
 
     if "login_layout" in changes and changes["login_layout"] not in branding.LAYOUTS:
         raise HTTPException(status_code=400, detail=f"layout must be one of {', '.join(branding.LAYOUTS)}")
@@ -68,48 +99,50 @@ async def update_branding(
         if url and not url.startswith(("https://", "http://", "/")):
             raise HTTPException(status_code=400, detail="Image URL must start with https://, http:// or /")
         changes["login_image_url"] = url
+    if "login_image_id" in changes:
+        image_id = str(changes["login_image_id"]).strip()
+        if image_id and branding.path_for(image_id) is None:
+            raise HTTPException(status_code=404, detail="No such image in the library")
+        changes["login_image_id"] = image_id
 
-    before = await appsettings.get_all(db)
     await appsettings.update(db, {k: str(v) for k, v in changes.items()})
-    changed = [f"{k}: {before.get(k, '')!r} → {v!r}" for k, v in changes.items() if before.get(k) != str(v)]
-    if changed:
-        await audit.record(db, "update_branding", "login page", "; ".join(changed), actor=me.username)
-        await db.commit()
-    return BrandingOut(**branding.public_view(await appsettings.get_all(db)))
+    return await _view(db)
 
 
-@router.post("/image", response_model=BrandingOut, status_code=status.HTTP_201_CREATED)
-async def upload_branding_image(
+@router.post("/images", response_model=BrandingOut, status_code=status.HTTP_201_CREATED)
+async def upload_image(
     file: UploadFile = File(...),
-    me: Admin = Depends(require_superadmin),
+    activate: bool = True,
+    _: Admin = Depends(require_superadmin),
     db: AsyncSession = Depends(get_session),
 ):
+    """Add an image to the library and, by default, show it."""
     blob = await file.read()
     try:
         ext = branding.validate(file.content_type or "", blob)
+        image_id = branding.save(blob, ext)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    try:
-        stamp = branding.save(blob, ext)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Could not write the image: {exc}") from exc
 
-    await appsettings.update(db, {"login_image_version": stamp})
-    await audit.record(
-        db, "update_branding", "login image",
-        f"uploaded {file.filename!r}, {len(blob) // 1024} KB, {ext}", actor=me.username,
-    )
-    await db.commit()
-    return BrandingOut(**branding.public_view(await appsettings.get_all(db)))
+    if activate:
+        await appsettings.update(db, {"login_image_id": image_id})
+    return await _view(db)
 
 
-@router.delete("/image", response_model=BrandingOut)
-async def delete_branding_image(
-    me: Admin = Depends(require_superadmin),
+@router.delete("/images/{image_id}", response_model=BrandingOut)
+async def delete_image(
+    image_id: str,
+    _: Admin = Depends(require_superadmin),
     db: AsyncSession = Depends(get_session),
 ):
-    if branding.remove():
-        await appsettings.update(db, {"login_image_version": "0"})
-        await audit.record(db, "update_branding", "login image", "removed", actor=me.username)
-        await db.commit()
-    return BrandingOut(**branding.public_view(await appsettings.get_all(db)))
+    if not branding.remove(image_id):
+        raise HTTPException(status_code=404, detail="No such image")
+    # Deleting the one on show leaves the login page pointing at nothing, so
+    # fall back to whatever else the library holds rather than to a blank.
+    values = await appsettings.get_all(db)
+    if (values.get("login_image_id") or "").strip() == image_id:
+        remaining = branding.library()
+        await appsettings.update(db, {"login_image_id": remaining[0]["id"] if remaining else ""})
+    return await _view(db)

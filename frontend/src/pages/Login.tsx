@@ -27,8 +27,8 @@ const FALLBACK: Branding = {
   login_focal: "center",
   login_overlay: 45,
   login_image_url: "",
+  login_image_id: "",
   has_image: false,
-  login_image_version: "0",
 };
 
 function BrandMark({ name }: { name: string }) {

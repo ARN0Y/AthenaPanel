@@ -354,8 +354,17 @@ export interface Branding {
   login_focal: "center" | "top" | "bottom" | "left" | "right";
   login_overlay: number;
   login_image_url: string;
+  login_image_id: string;
   has_image: boolean;
-  login_image_version: string;
+}
+
+/** One entry in the artwork library. */
+export interface BrandingImage {
+  id: string;
+  content_type: string;
+  bytes: number;
+  uploaded_at: number;
+  active: boolean;
 }
 
 export interface BrandingPayload {
@@ -365,16 +374,23 @@ export interface BrandingPayload {
   login_focal?: string;
   login_overlay?: number;
   login_image_url?: string;
+  login_image_id?: string;
 }
 
 /**
- * The artwork's URL. The version stamp is what lets the response be cached
- * forever: replacing the image changes the stamp, which changes the URL.
+ * The active artwork's URL. The id is the content hash, so a given URL can
+ * never mean different bytes and the response caches forever.
  */
 export function brandingImageUrl(b: Branding | undefined | null): string {
   if (!b?.has_image) return "";
   if (b.login_image_url) return b.login_image_url;
-  return `/api/branding/image?v=${encodeURIComponent(b.login_image_version)}`;
+  if (!b.login_image_id) return "";
+  return `/api/branding/image?id=${encodeURIComponent(b.login_image_id)}`;
+}
+
+/** A specific stored image, for the settings gallery. */
+export function brandingThumbUrl(id: string): string {
+  return `/api/branding/image?id=${encodeURIComponent(id)}`;
 }
 
 // ---- Endpoints ----
@@ -506,16 +522,19 @@ export const api = {
   branding: () => request<Branding>("/api/branding"),
   updateBranding: (p: BrandingPayload) =>
     request<Branding>("/api/settings/branding", { method: "PUT", body: JSON.stringify(p) }),
+  brandingImages: () => request<BrandingImage[]>("/api/settings/branding/images"),
   uploadBrandingImage: (file: File) => {
     const body = new FormData();
     body.append("file", file);
     // No Content-Type here on purpose: the browser has to set the multipart
     // boundary itself, and naming the header would overwrite it with one that
     // has no boundary at all.
-    return request<Branding>("/api/settings/branding/image", { method: "POST", body });
+    return request<Branding>("/api/settings/branding/images", { method: "POST", body });
   },
-  deleteBrandingImage: () =>
-    request<Branding>("/api/settings/branding/image", { method: "DELETE" }),
+  deleteBrandingImage: (id: string) =>
+    request<Branding>(`/api/settings/branding/images/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
 
   settings: () => request<ServerSettings>("/api/settings"),
   updateSettings: (p: PanelSettingsPayload) =>
