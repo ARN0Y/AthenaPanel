@@ -1,0 +1,45 @@
+# REFERENCE COPY of the `config setup` block from the master's /etc/ipsec.conf.
+#
+# ipsec.conf is not deployed from this repo — libreswan here is source-built and
+# the file is edited in place. This copy exists so the two settings that stop
+# the recurring L2TP outage are not lost the next time the box is rebuilt, and
+# so anyone reading the watchdog can see what it is backing up.
+#
+# Taken from production 2026-09-03. Backups of the original live in /root as
+# ipsec.conf.bak-<timestamp>.
+
+config setup
+    # Bind ONE address instead of enumerating every interface. With ~80 ppp
+    # interfaces all sharing 192.168.44.1, pluto emitted a warning per PAIR at
+    # startup and blocked writing them to the log socket before it ever bound
+    # its IKE sockets - wchan sock_alloc_send_pskb, zero UDP listeners, zero
+    # SAs. Every customer arrives by DNAT from the Iran relay to 10.50.50.1 on
+    # bh2, so this is the only address that carries IKE anyway.
+    listen=10.50.50.1
+  ikev1-policy=accept
+  virtual-private=%v4:10.0.0.0/8,%v4:192.168.0.0/16,%v4:172.16.0.0/12,%v4:!192.168.42.0/24,%v4:!192.168.43.0/24,%v6:fc00::/7,%v6:!fddd:500:500:500::/64
+  uniqueids=no
+  # ROOT FIX for the recurring L2TP outage (2026-08-29, 2026-09-02).
+  #
+  # pluto polls its IKE socket for POLLERR, and when it sees one it drains the
+  # socket error queue before reading the packet. On this box the error flag
+  # latches on with an EMPTY error queue, so recvmsg(MSG_ERRQUEUE) returns
+  # EAGAIN forever, pluto logs every attempt, and it loops - poll, recvmsg,
+  # log, poll - never reaching recvfrom even though the same poll reports
+  # POLLIN with data waiting. Traced: 10,317 failed recvmsg and 10,013 syslog
+  # writes in 5 seconds against 18 actual packet reads. udp/500's receive
+  # buffer then fills and stays full, so every new customer's first IKE packet
+  # is dropped and Windows says "the security layer encountered a processing
+  # error during initial negotiations". Sessions holding an SA keep working on
+  # udp/4500, which is why it looks like a partial fault.
+  #
+  # Turning the error queue off removes the loop at its source. What is given
+  # up is ICMP feedback on the IKE socket (chiefly PMTU); acceptable here
+  # because these are small PSK exchanges and DPD already detects dead peers.
+  ike-socket-errqueue=no
+  # Headroom so a reconnect burst cannot fill the buffer in the first place.
+  # Default is net.core.rmem_default (1 MB) - the exact figure the queue was
+  # pinned at.
+  ike-socket-bufsize=8388608
+
+conn shared
